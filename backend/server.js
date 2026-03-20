@@ -24,212 +24,177 @@ app.use(session({
 // Serve frontend static files
 app.use(express.static(path.join(__dirname, '../frontend')));
 
-// ─────────────────────────────────────────────
-// ROUTE: Salesforce Login
-// ─────────────────────────────────────────────
-app.post('/api/sf/login', async (req, res) => {
-  const { username, password, securityToken, isSandbox } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
+// ——————————————————————————
+// ROUTE: Initiate Salesforce OAuth Login
+// ——————————————————————————
+app.get('/auth/salesforce', (req, res) => {
+  const instanceUrl = req.query.instance_url || 'https://login.salesforce.com';
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: process.env.SF_CLIENT_ID,
+    redirect_uri: process.env.SF_CALLBACK_URL,
+    scope: 'api full refresh_token',
+    state: encodeURIComponent(instanceUrl)
+  });
+  const authUrl = instanceUrl + '/services/oauth2/authorize?' + params.toString();
+  res.redirect(authUrl);
+});
+
+// ——————————————————————————
+// ROUTE: OAuth Callback
+// ——————————————————————————
+app.get('/oauth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+
+  if (error) {
+    return res.redirect('/?error=' + encodeURIComponent(error));
   }
+
+  const instanceUrl = decodeURIComponent(state || 'https://login.salesforce.com');
+
   try {
-    const loginUrl = isSandbox ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
-    const passwordWithToken = securityToken ? password + securityToken : password;
-    const params = new URLSearchParams({
-      grant_type: 'password',
+    const tokenResponse = await axios.post(instanceUrl + '/services/oauth2/token', new URLSearchParams({
+      grant_type: 'authorization_code',
       client_id: process.env.SF_CLIENT_ID,
       client_secret: process.env.SF_CLIENT_SECRET,
-      username,
-      password: passwordWithToken,
+      redirect_uri: process.env.SF_CALLBACK_URL,
+      code: code
+    }), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
-    const response = await axios.post(`${loginUrl}/services/oauth2/token`, params, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+
+    const { access_token, instance_url } = tokenResponse.data;
+
+    // Get user info
+    const userInfo = await axios.get(instance_url + '/services/oauth2/userinfo', {
+      headers: { Authorization: 'Bearer ' + access_token }
     });
-    const { access_token, instance_url } = response.data;
-    req.session.sf = { access_token, instance_url, username };
-    res.json({ success: true, message: 'Connected to Salesforce!', instance_url, username });
+
+    req.session.sfAccessToken = access_token;
+    req.session.sfInstanceUrl = instance_url;
+    req.session.sfUserInfo = userInfo.data;
+
+    res.redirect('/?connected=true');
   } catch (err) {
-    const sfError = err.response?.data?.error_description || err.message;
-    res.status(401).json({ error: `Salesforce login failed: ${sfError}` });
+    console.error('OAuth callback error:', err.response?.data || err.message);
+    res.redirect('/?error=' + encodeURIComponent('Authentication failed: ' + (err.response?.data?.error_description || err.message)));
   }
 });
 
-// ─────────────────────────────────────────────
-// ROUTE: Check Salesforce Session
-// ─────────────────────────────────────────────
-app.get('/api/sf/status', (req, res) => {
-  if (req.session.sf) {
-    res.json({ connected: true, username: req.session.sf.username, instance_url: req.session.sf.instance_url });
+// ——————————————————————————
+// ROUTE: Check Auth Status
+// ——————————————————————————
+app.get('/api/auth/status', (req, res) => {
+  if (req.session.sfAccessToken) {
+    res.json({
+      connected: true,
+      user: req.session.sfUserInfo
+    });
   } else {
     res.json({ connected: false });
   }
 });
 
-// ─────────────────────────────────────────────
+// ——————————————————————————
 // ROUTE: Logout
-// ─────────────────────────────────────────────
-app.post('/api/sf/logout', (req, res) => {
+// ——————————————————————————
+app.post('/api/auth/logout', (req, res) => {
   req.session.destroy();
   res.json({ success: true });
 });
 
-// ─────────────────────────────────────────────
-// ROUTE: List all Salesforce Objects
-// ─────────────────────────────────────────────
-app.get('/api/sf/objects', async (req, res) => {
-  if (!req.session.sf) return res.status(401).json({ error: 'Not connected to Salesforce' });
-  try {
-    const { access_token, instance_url } = req.session.sf;
-    const response = await axios.get(`${instance_url}/services/data/v59.0/sobjects/`, {
-      headers: { Authorization: `Bearer ${access_token}` }
-    });
-    const objects = response.data.sobjects.map(obj => ({
-      name: obj.name, label: obj.label, custom: obj.custom,
-    }));
-    res.json({ objects });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch Salesforce objects' });
-  }
-});
-
-// ─────────────────────────────────────────────
-// ROUTE: Get metadata for a specific object
-// ─────────────────────────────────────────────
-app.get('/api/sf/metadata/:objectName', async (req, res) => {
-  if (!req.session.sf) return res.status(401).json({ error: 'Not connected to Salesforce' });
-  try {
-    const { access_token, instance_url } = req.session.sf;
-    const response = await axios.get(
-      `${instance_url}/services/data/v59.0/sobjects/${req.params.objectName}/describe/`,
-      { headers: { Authorization: `Bearer ${access_token}` } }
-    );
-    res.json(response.data);
-  } catch (err) {
-    res.status(500).json({ error: `Failed to fetch metadata for ${req.params.objectName}` });
-  }
-});
-
-// ─────────────────────────────────────────────
-// ROUTE: Main Chat Endpoint
-// ─────────────────────────────────────────────
+// ——————————————————————————
+// ROUTE: Chat with Claude
+// ——————————————————————————
 app.post('/api/chat', async (req, res) => {
-  if (!req.session.sf) return res.status(401).json({ error: 'Not connected to Salesforce' });
-  const { message, conversationHistory } = req.body;
-  if (!message) return res.status(400).json({ error: 'Message is required' });
+  if (!req.session.sfAccessToken) {
+    return res.status(401).json({ error: 'Not authenticated with Salesforce' });
+  }
+
+  const { message } = req.body;
+  const accessToken = req.session.sfAccessToken;
+  const instanceUrl = req.session.sfInstanceUrl;
 
   try {
-    const { access_token, instance_url } = req.session.sf;
+    // Fetch Salesforce metadata
+    let metadataContext = '';
 
-    // Step 1: Detect which Salesforce object(s) the user is asking about
-    const objectDetectionResponse = await anthropic.messages.create({
-      model: 'claude-opus-4-5',
-      max_tokens: 200,
-      messages: [{
-        role: 'user',
-        content: `Extract Salesforce object names from this question. Return ONLY a JSON array of object API names like ["Account"] or ["Opportunity","Contact"]. If no specific object is mentioned return ["Account"].
-Question: "${message}"`
-      }]
-    });
-
-    let objectNames = ['Account'];
     try {
-      const detected = objectDetectionResponse.content[0].text.trim();
-      const jsonMatch = detected.match(/\[.*\]/s);
-      if (jsonMatch) objectNames = JSON.parse(jsonMatch[0]);
-    } catch (e) { /* fallback */ }
+      // Get list of objects
+      const describeResponse = await axios.get(
+        instanceUrl + '/services/data/v57.0/sobjects/',
+        { headers: { Authorization: 'Bearer ' + accessToken } }
+      );
 
-    // Step 2: Fetch metadata for detected objects (max 3)
-    const metadataResults = await Promise.all(
-      objectNames.slice(0, 3).map(async (objName) => {
-        try {
-          const response = await axios.get(
-            `${instance_url}/services/data/v59.0/sobjects/${objName}/describe/`,
-            { headers: { Authorization: `Bearer ${access_token}` } }
-          );
-          return { name: objName, metadata: response.data };
-        } catch (e) {
-          return { name: objName, metadata: null };
+      const objects = describeResponse.data.sobjects
+        .filter(obj => obj.queryable && obj.createable)
+        .slice(0, 30)
+        .map(obj => obj.name)
+        .join(', ');
+
+      metadataContext = 'Available Salesforce Objects: ' + objects + '\n\n';
+
+      // If user mentions a specific object, get its details
+      const objectMatch = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
+      if (objectMatch) {
+        for (const objName of objectMatch.slice(0, 2)) {
+          try {
+            const objDescribe = await axios.get(
+              instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/',
+              { headers: { Authorization: 'Bearer ' + accessToken } }
+            );
+
+            const fields = objDescribe.data.fields.map(f => ({
+              name: f.name,
+              label: f.label,
+              type: f.type,
+              required: !f.nillable && !f.defaultedOnCreate
+            }));
+
+            metadataContext += 'Object: ' + objName + '\n';
+            metadataContext += 'Label: ' + objDescribe.data.label + '\n';
+            metadataContext += 'Fields: ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
+          } catch (e) {
+            // Object not found or no access, skip
+          }
         }
-      })
-    );
-
-    // Step 3: Build metadata context summary
-    const metadataContext = metadataResults.filter(r => r.metadata).map(r => ({
-      objectName: r.name,
-      label: r.metadata.label,
-      fields: r.metadata.fields.map(f => ({
-        name: f.name,
-        label: f.label,
-        type: f.type,
-        required: !f.nillable && !f.defaultedOnCreate,
-        unique: f.unique,
-        referenceTo: f.referenceTo?.length ? f.referenceTo : undefined,
-        picklistValues: f.picklistValues?.length ? f.picklistValues.map(p => p.value) : undefined,
-      })),
-      childRelationships: r.metadata.childRelationships?.slice(0, 10).map(c => ({
-        childObject: c.childSObject, field: c.field
-      })),
-    }));
-
-    // Step 4: Call Claude with metadata context + user question
-    const systemPrompt = `You are an expert Salesforce Solution Architect and Business Analyst with deep knowledge of Salesforce metadata, data models, and best practices.
-
-You have been provided with live Salesforce object metadata from the user's actual org.
-
-Your role:
-1. Analyze the provided metadata carefully
-2. Answer questions accurately based on real org configuration
-3. Generate detailed, professional design specifications when requested
-4. Identify gaps, recommendations, and best practices
-
-When generating design specs, include:
-- ## Object Overview
-- ## Data Model & Fields Analysis
-- ## Relationships & Dependencies
-- ## Required vs Optional Fields
-- ## Recommended Automations / Validations
-- ## Integration Considerations
-- ## Recommendations & Best Practices
-
-Format responses with clear markdown headings, tables where appropriate, and professional structure.`;
-
-    const messages = [
-      ...(conversationHistory || []),
-      {
-        role: 'user',
-        content: `## Salesforce Org Metadata
-
-${JSON.stringify(metadataContext, null, 2)}
-
-## User Question
-${message}`
       }
-    ];
+    } catch (metaErr) {
+      console.error('Metadata fetch error:', metaErr.message);
+      metadataContext = 'Unable to fetch metadata. ';
+    }
+
+    // Call Claude
+    const systemPrompt = `You are a Salesforce design specification expert. Based on the Salesforce metadata provided, generate detailed, structured design specifications.
+
+When creating design specs include:
+- Object overview and purpose
+- Field specifications (type, validation, required/optional)
+- UI/UX recommendations  
+- Business rules and logic
+- Relationships and dependencies
+- Security considerations
+
+Salesforce Metadata Context:
+${metadataContext}`;
 
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-opus-4-5',
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages,
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: message }],
+      system: systemPrompt
     });
 
-    res.json({
-      response: claudeResponse.content[0].text,
-      objectsAnalyzed: objectNames,
-      tokensUsed: claudeResponse.usage,
-    });
-
+    res.json({ response: claudeResponse.content[0].text });
   } catch (err) {
     console.error('Chat error:', err.message);
-    res.status(500).json({ error: `Chat failed: ${err.message}` });
+    res.status(500).json({ error: 'Error processing request: ' + err.message });
   }
 });
 
-// Serve frontend for all other routes (SPA support)
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../frontend/index.html'));
-});
-
+// ——————————————————————————
+// START SERVER
+// ——————————————————————————
 app.listen(PORT, () => {
-  console.log(`✅ SF Claude Designer running at http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });

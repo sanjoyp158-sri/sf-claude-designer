@@ -1,349 +1,172 @@
-// ============================================
-// SF Claude Designer - Frontend App Logic
-// ============================================
+// SF Claude Designer - Frontend App
 
-const API_BASE = window.location.origin;
+const chatMessages = document.getElementById('chatMessages');
+const chatInput = document.getElementById('chatInput');
+const sendBtn = document.getElementById('sendBtn');
+const loginBtn = document.getElementById('loginBtn');
+const logoutBtn = document.getElementById('logoutBtn');
+const loginModal = document.getElementById('loginModal');
+const authStatus = document.getElementById('authStatus');
+const userInfo = document.getElementById('userInfo');
 
-// State
-let conversationHistory = [];
-let isLoading = false;
+let isConnected = false;
 
-// ─────────────────────────────────────────────
-// INITIALIZATION
-// ─────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', async () => {
-  // Configure marked.js
-  marked.setOptions({
-    highlight: (code, lang) => {
-      if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(code, { language: lang }).value;
-      }
-      return hljs.highlightAuto(code).value;
-    },
-    breaks: true,
-    gfm: true,
-  });
+// Check auth status on page load
+async function checkAuthStatus() {
+  try {
+    const response = await fetch('/api/auth/status', { credentials: 'include' });
+    const data = await response.json();
+    if (data.connected) {
+      setConnected(data.user);
+    } else {
+      setDisconnected();
+    }
+  } catch (err) {
+    setDisconnected();
+  }
+}
 
-  // Check if already connected
-  await checkConnection();
+function setConnected(user) {
+  isConnected = true;
+  loginBtn.style.display = 'none';
+  logoutBtn.style.display = 'inline-block';
+  authStatus.textContent = 'Connected to Salesforce';
+  authStatus.className = 'auth-status connected';
+  if (user) {
+    userInfo.textContent = user.name || user.email || 'Salesforce User';
+    userInfo.style.display = 'block';
+  }
+  chatInput.disabled = false;
+  sendBtn.disabled = false;
+  chatInput.placeholder = 'Ask about Salesforce objects, metadata, design specs...';
+
+  // Check for URL params
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('connected') === 'true') {
+    addMessage('assistant', 'Successfully connected to Salesforce! You can now ask me to generate design specs for any Salesforce object. Try: "Generate a design spec for the Account object"');
+    window.history.replaceState({}, '', '/');
+  }
+}
+
+function setDisconnected() {
+  isConnected = false;
+  loginBtn.style.display = 'inline-block';
+  logoutBtn.style.display = 'none';
+  authStatus.textContent = 'Not connected';
+  authStatus.className = 'auth-status disconnected';
+  userInfo.style.display = 'none';
+  chatInput.disabled = true;
+  sendBtn.disabled = true;
+  chatInput.placeholder = 'Login to Salesforce to start chatting...';
+
+  const params = new URLSearchParams(window.location.search);
+  const error = params.get('error');
+  if (error) {
+    addMessage('assistant', 'Login failed: ' + decodeURIComponent(error) + '. Please try again.');
+    window.history.replaceState({}, '', '/');
+  }
+}
+
+// Login button - show modal to select org type
+loginBtn.addEventListener('click', () => {
+  loginModal.style.display = 'flex';
 });
 
-// ─────────────────────────────────────────────
-// CHECK EXISTING SESSION
-// ─────────────────────────────────────────────
-async function checkConnection() {
-  try {
-    const res = await fetch(`${API_BASE}/api/sf/status`, { credentials: 'include' });
-    const data = await res.json();
-    if (data.connected) {
-      showMainApp(data.username, data.instance_url);
-    }
-  } catch (e) {
-    console.log('No existing session');
+// Close modal on backdrop click
+loginModal.addEventListener('click', (e) => {
+  if (e.target === loginModal) loginModal.style.display = 'none';
+});
+
+// Handle org selection buttons in modal
+document.addEventListener('click', (e) => {
+  if (e.target.classList.contains('org-btn')) {
+    const instanceUrl = e.target.dataset.url;
+    loginModal.style.display = 'none';
+    window.location.href = '/auth/salesforce?instance_url=' + encodeURIComponent(instanceUrl);
   }
-}
-
-// ─────────────────────────────────────────────
-// LOGIN HANDLER
-// ─────────────────────────────────────────────
-async function handleLogin() {
-  const username = document.getElementById('sfUsername').value.trim();
-  const password = document.getElementById('sfPassword').value;
-  const securityToken = document.getElementById('sfToken').value.trim();
-  const isSandbox = document.getElementById('isSandbox').checked;
-  const errorEl = document.getElementById('loginError');
-  const btnText = document.getElementById('loginBtnText');
-  const spinner = document.getElementById('loginSpinner');
-  const btn = document.getElementById('loginBtn');
-
-  // Validate
-  if (!username || !password) {
-    showLoginError('Please enter your username and password.');
-    return;
+  if (e.target.id === 'cancelLogin') {
+    loginModal.style.display = 'none';
   }
+});
 
-  // Show loading
-  errorEl.classList.add('hidden');
-  btn.disabled = true;
-  btnText.textContent = 'Connecting...';
-  spinner.classList.remove('hidden');
+// Logout
+logoutBtn.addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+  setDisconnected();
+  addMessage('assistant', 'Logged out from Salesforce.');
+});
 
-  try {
-    const res = await fetch(`${API_BASE}/api/sf/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ username, password, securityToken, isSandbox }),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      throw new Error(data.error || 'Login failed');
-    }
-
-    showMainApp(data.username, data.instance_url);
-
-  } catch (err) {
-    showLoginError(err.message);
-  } finally {
-    btn.disabled = false;
-    btnText.textContent = 'Connect to Salesforce';
-    spinner.classList.add('hidden');
-  }
-}
-
-function showLoginError(msg) {
-  const errorEl = document.getElementById('loginError');
-  errorEl.textContent = msg;
-  errorEl.classList.remove('hidden');
-}
-
-// ─────────────────────────────────────────────
-// SHOW MAIN APP
-// ─────────────────────────────────────────────
-function showMainApp(username, instanceUrl) {
-  document.getElementById('loginModal').classList.remove('active');
-  document.getElementById('mainApp').classList.remove('hidden');
-  document.getElementById('connectedUser').textContent = username;
-  conversationHistory = [];
-}
-
-// ─────────────────────────────────────────────
-// LOGOUT HANDLER
-// ─────────────────────────────────────────────
-async function handleLogout() {
-  try {
-    await fetch(`${API_BASE}/api/sf/logout`, { method: 'POST', credentials: 'include' });
-  } catch (e) {}
-  document.getElementById('mainApp').classList.add('hidden');
-  document.getElementById('loginModal').classList.add('active');
-  document.getElementById('sfPassword').value = '';
-  document.getElementById('sfToken').value = '';
-  document.getElementById('loginError').classList.add('hidden');
-  conversationHistory = [];
-  document.getElementById('chatMessages').innerHTML = getWelcomeHTML();
-}
-
-// ─────────────────────────────────────────────
-// LOAD SALESFORCE OBJECTS
-// ─────────────────────────────────────────────
-async function loadObjects() {
-  const container = document.getElementById('objectsList');
-  container.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:8px 0;">Loading...</div>';
-
-  try {
-    const res = await fetch(`${API_BASE}/api/sf/objects`, { credentials: 'include' });
-    const data = await res.json();
-
-    if (!res.ok) throw new Error(data.error);
-
-    const objects = data.objects.sort((a, b) => a.label.localeCompare(b.label));
-
-    container.innerHTML = objects.map(obj => `
-      <div class="object-item ${obj.custom ? 'custom' : ''}" onclick="insertPrompt('Generate a design spec for the ${obj.name} object')">
-        ${obj.label} ${obj.custom ? '⚡' : ''}
-      </div>
-    `).join('');
-
-  } catch (err) {
-    container.innerHTML = `<div style="color:var(--error);font-size:12px;">${err.message}</div>`;
-  }
-}
-
-// ─────────────────────────────────────────────
-// SEND MESSAGE
-// ─────────────────────────────────────────────
+// Send message
 async function sendMessage() {
-  if (isLoading) return;
+  const message = chatInput.value.trim();
+  if (!message || !isConnected) return;
 
-  const input = document.getElementById('chatInput');
-  const message = input.value.trim();
-  if (!message) return;
+  chatInput.value = '';
+  addMessage('user', message);
 
-  // Clear input
-  input.value = '';
-  input.style.height = 'auto';
-
-  // Add user message to UI
-  appendMessage('user', message);
-
-  // Add to conversation history
-  conversationHistory.push({ role: 'user', content: message });
-
-  // Show thinking indicator
-  const thinkingId = showThinking();
-
-  isLoading = true;
-  document.getElementById('sendBtn').disabled = true;
+  const typingId = addMessage('assistant', '...', true);
 
   try {
-    const res = await fetch(`${API_BASE}/api/chat`, {
+    const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({
-        message,
-        conversationHistory: conversationHistory.slice(-10), // last 10 messages
-      }),
+      body: JSON.stringify({ message })
     });
 
-    const data = await res.json();
+    const data = await response.json();
+    removeMessage(typingId);
 
-    if (!res.ok) {
-      throw new Error(data.error || 'Chat failed');
+    if (data.error) {
+      addMessage('assistant', 'Error: ' + data.error);
+    } else {
+      addMessage('assistant', data.response);
     }
-
-    // Remove thinking indicator
-    removeThinking(thinkingId);
-
-    // Add assistant response
-    appendMessage('assistant', data.response, data.objectsAnalyzed);
-
-    // Add to conversation history
-    conversationHistory.push({ role: 'assistant', content: data.response });
-
   } catch (err) {
-    removeThinking(thinkingId);
-    appendMessage('assistant', `❌ **Error:** ${err.message}`);
-  } finally {
-    isLoading = false;
-    document.getElementById('sendBtn').disabled = false;
+    removeMessage(typingId);
+    addMessage('assistant', 'Error: Could not connect to server. Please check if the server is running.');
   }
 }
 
-// ─────────────────────────────────────────────
-// APPEND MESSAGE TO CHAT
-// ─────────────────────────────────────────────
-function appendMessage(role, content, objectsAnalyzed) {
-  const messagesEl = document.getElementById('chatMessages');
-
-  // Remove welcome message if it exists
-  const welcome = messagesEl.querySelector('.welcome-message');
-  if (welcome) welcome.remove();
-
-  const isUser = role === 'user';
-  const avatarContent = isUser ? 'You' : '🤖';
-  const label = isUser ? 'You' : 'Claude AI';
-
-  const renderedContent = isUser
-    ? escapeHtml(content).replace(/\n/g, '<br>')
-    : marked.parse(content);
-
-  const objectBadges = objectsAnalyzed
-    ? `<div class="objects-analyzed">Analyzed: ${objectsAnalyzed.map(o => `<span>${o}</span>`).join('')}</div>`
-    : '';
-
-  const messageEl = document.createElement('div');
-  messageEl.className = `message ${isUser ? 'user-message' : 'assistant-message'}`;
-  messageEl.innerHTML = `
-    <div class="message-avatar ${isUser ? 'user-avatar' : 'assistant-avatar'}">${avatarContent}</div>
-    <div class="message-content">
-      <div class="message-label">${label}</div>
-      <div class="message-bubble">${renderedContent}</div>
-      ${objectBadges}
-    </div>
-  `;
-
-  messagesEl.appendChild(messageEl);
-
-  // Highlight code blocks
-  messageEl.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
-
-  // Scroll to bottom
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-// ─────────────────────────────────────────────
-// THINKING INDICATOR
-// ─────────────────────────────────────────────
-function showThinking() {
-  const messagesEl = document.getElementById('chatMessages');
-  const id = 'thinking-' + Date.now();
-  const el = document.createElement('div');
-  el.id = id;
-  el.className = 'message assistant-message';
-  el.innerHTML = `
-    <div class="message-avatar assistant-avatar">🤖</div>
-    <div class="message-content">
-      <div class="message-label">Claude AI</div>
-      <div class="message-bubble">
-        <div class="thinking-indicator">
-          Analyzing Salesforce metadata
-          <div class="thinking-dots">
-            <span></span><span></span><span></span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-  messagesEl.appendChild(el);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+function addMessage(role, content, isTyping = false) {
+  const id = 'msg-' + Date.now();
+  const msgDiv = document.createElement('div');
+  msgDiv.className = 'message ' + role;
+  msgDiv.id = id;
+  if (isTyping) {
+    msgDiv.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+  } else {
+    msgDiv.innerHTML = '<div class="message-content">' + formatMessage(content) + '</div>';
+  }
+  chatMessages.appendChild(msgDiv);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
   return id;
 }
 
-function removeThinking(id) {
+function removeMessage(id) {
   const el = document.getElementById(id);
   if (el) el.remove();
 }
 
-// ─────────────────────────────────────────────
-// KEYBOARD HANDLING
-// ─────────────────────────────────────────────
-function handleKeyDown(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-}
-
-// ─────────────────────────────────────────────
-// INSERT QUICK PROMPT
-// ─────────────────────────────────────────────
-function insertPrompt(text) {
-  const input = document.getElementById('chatInput');
-  input.value = text;
-  input.focus();
-  autoResize(input);
-}
-
-// ─────────────────────────────────────────────
-// AUTO-RESIZE TEXTAREA
-// ─────────────────────────────────────────────
-function autoResize(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-}
-
-// ─────────────────────────────────────────────
-// HTML ESCAPE
-// ─────────────────────────────────────────────
-function escapeHtml(text) {
+function formatMessage(text) {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`(.+?)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br>');
 }
 
-// ─────────────────────────────────────────────
-// WELCOME HTML
-// ─────────────────────────────────────────────
-function getWelcomeHTML() {
-  return `
-    <div class="welcome-message">
-      <div class="welcome-icon">🤖</div>
-      <h2>Welcome to SF Claude Designer!</h2>
-      <p>I'm connected to your Salesforce org. Ask me anything about your objects, fields, or request a design specification.</p>
-      <div class="example-questions">
-        <p><strong>Try asking:</strong></p>
-        <ul>
-          <li>"Generate a complete design spec for the Account object"</li>
-          <li>"What are all the fields on the Opportunity object?"</li>
-          <li>"Describe the relationship between Account, Contact and Opportunity"</li>
-          <li>"What custom objects exist in my org?"</li>
-        </ul>
-      </div>
-    </div>
-  `;
-}
+sendBtn.addEventListener('click', sendMessage);
+chatInput.addEventListener('keypress', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// Initialize
+checkAuthStatus();
+addMessage('assistant', 'Welcome to SF Claude Designer! Click "Login to Salesforce" to connect your org and start generating design specs.');

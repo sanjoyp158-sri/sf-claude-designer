@@ -10,6 +10,12 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// SF_LOGIN_URL is the My Domain URL of your Salesforce org
+// For External Client Apps, OAuth must go through the org's My Domain URL
+// e.g. https://cognizant39.my.salesforce.com
+const SF_PROD_URL = process.env.SF_LOGIN_URL || 'https://cognizant39.my.salesforce.com';
+const SF_SANDBOX_URL = process.env.SF_SANDBOX_URL || 'https://test.salesforce.com';
+
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(session({
@@ -25,10 +31,8 @@ app.use(express.static(path.join(__dirname, '../frontend')));
 // ——————————————————————————
 app.get('/auth/url', (req, res) => {
   const orgType = req.query.org_type || 'production';
-  const loginUrl = orgType === 'sandbox'
-    ? 'https://test.salesforce.com'
-    : 'https://login.salesforce.com';
-
+  // For External Client Apps, MUST use the org's My Domain URL (not login.salesforce.com)
+  const loginUrl = orgType === 'sandbox' ? SF_SANDBOX_URL : SF_PROD_URL;
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: process.env.SF_CLIENT_ID,
@@ -36,7 +40,6 @@ app.get('/auth/url', (req, res) => {
     scope: 'api full refresh_token',
     state: encodeURIComponent(loginUrl)
   });
-
   res.json({ url: loginUrl + '/services/oauth2/authorize?' + params.toString() });
 });
 
@@ -47,14 +50,16 @@ app.get('/oauth/callback', async (req, res) => {
   const { code, state, error, error_description } = req.query;
 
   if (error) {
-    // Send HTML that closes popup and sends error to parent
     return res.send(`<!DOCTYPE html><html><body><script>
-      window.opener && window.opener.postMessage({ type: 'SF_AUTH_ERROR', error: '${error_description || error}' }, '*');
+      window.opener && window.opener.postMessage({
+        type: 'SF_AUTH_ERROR',
+        error: '${(error_description || error).replace(/'/g, "\\'")}'
+      }, '*');
       window.close();
     </script></body></html>`);
   }
 
-  const loginUrl = decodeURIComponent(state || 'https://login.salesforce.com');
+  const loginUrl = decodeURIComponent(state || SF_PROD_URL);
 
   try {
     const tokenRes = await axios.post(
@@ -80,7 +85,6 @@ app.get('/oauth/callback', async (req, res) => {
     req.session.sfInstanceUrl = instance_url;
     req.session.sfUserInfo = userRes.data;
 
-    // Send HTML that closes popup and notifies parent window
     res.send(`<!DOCTYPE html><html><body><script>
       window.opener && window.opener.postMessage({
         type: 'SF_AUTH_SUCCESS',
@@ -91,11 +95,14 @@ app.get('/oauth/callback', async (req, res) => {
 
   } catch (err) {
     console.error('OAuth error:', err.response?.data || err.message);
-    const msg = err.response?.data?.error_description || err.message;
+    const msg = (err.response?.data?.error_description || err.message || 'OAuth failed').replace(/'/g, "\'");
     res.send(`<!DOCTYPE html><html><body><script>
-      window.opener && window.opener.postMessage({ type: 'SF_AUTH_ERROR', error: '${msg.replace(/'/g, "\\'")}' }, '*');
+      window.opener && window.opener.postMessage({
+        type: 'SF_AUTH_ERROR',
+        error: '${msg}'
+      }, '*');
       window.close();
-    </script><p>Login failed: ${msg}</p></body></html>`);
+    </script><p>Login failed. Closing...</p></body></html>`);
   }
 });
 
@@ -151,7 +158,9 @@ app.post('/api/chat', async (req, res) => {
               { headers: { Authorization: 'Bearer ' + accessToken } }
             );
             const fields = objRes.data.fields.map(f => ({
-              name: f.name, label: f.label, type: f.type,
+              name: f.name,
+              label: f.label,
+              type: f.type,
               required: !f.nillable && !f.defaultedOnCreate
             }));
             metadataContext += 'Object: ' + objName + '\nLabel: ' + objRes.data.label + '\n';
@@ -174,6 +183,7 @@ ${metadataContext}`,
     });
 
     res.json({ response: claudeRes.content[0].text });
+
   } catch (err) {
     console.error('Chat error:', err.message);
     res.status(500).json({ error: err.message });

@@ -8,7 +8,6 @@
 </head>
 <body>
   <div class="app-container">
-    <!-- Header -->
     <header class="app-header">
       <div class="header-left">
         <h1>SF Claude Designer</h1>
@@ -21,18 +20,10 @@
       </div>
     </header>
 
-    <!-- Chat Container -->
     <div class="chat-container">
       <div id="chatMessages" class="chat-messages"></div>
-
       <div class="chat-input-area">
-        <textarea
-          id="chatInput"
-          class="chat-input"
-          placeholder="Login to Salesforce to start chatting..."
-          disabled
-          rows="2"
-        ></textarea>
+        <textarea id="chatInput" class="chat-input" placeholder="Login to Salesforce to start chatting..." disabled rows="2"></textarea>
         <button id="sendBtn" class="btn btn-send" disabled>Send</button>
       </div>
     </div>
@@ -42,14 +33,26 @@
   <div id="loginModal" class="modal" style="display:none;">
     <div class="modal-content">
       <h2>Connect to Salesforce</h2>
-      <p>Select your Salesforce org type to login:</p>
+      <p>Select your Salesforce org type:</p>
       <div class="org-buttons">
-        <button class="org-btn btn btn-primary" data-url="https://login.salesforce.com">
-          Production Org
+        <button id="btnProduction" class="org-btn btn-org-primary">
+          🏢 Production
         </button>
-        <button class="org-btn btn btn-secondary" data-url="https://test.salesforce.com">
-          Sandbox Org
+        <button id="btnSandbox" class="org-btn btn-org-secondary">
+          🧪 Sandbox
         </button>
+      </div>
+      <div class="custom-domain-section">
+        <p class="or-divider">— or use My Domain (custom URL) —</p>
+        <div class="custom-domain-input-row">
+          <input
+            type="text"
+            id="customDomainInput"
+            class="domain-input"
+            placeholder="e.g. cognizant39.my.salesforce.com"
+          />
+          <button id="btnCustomDomain" class="org-btn btn-org-custom">Connect</button>
+        </div>
       </div>
       <p class="modal-note">You will be redirected to Salesforce to login securely.</p>
       <button id="cancelLogin" class="btn btn-link">Cancel</button>

@@ -28,15 +28,26 @@ app.use(express.static(path.join(__dirname, '../frontend')));
 // ROUTE: Initiate Salesforce OAuth Login
 // ——————————————————————————
 app.get('/auth/salesforce', (req, res) => {
-  const instanceUrl = req.query.instance_url || 'https://login.salesforce.com';
+  // Use the org's My Domain URL directly — required for External Client Apps
+  const orgType = req.query.org_type || 'production';
+  let loginUrl;
+  if (orgType === 'sandbox') {
+    loginUrl = 'https://test.salesforce.com';
+  } else if (process.env.SF_LOGIN_URL) {
+    loginUrl = process.env.SF_LOGIN_URL;
+  } else {
+    loginUrl = 'https://login.salesforce.com';
+  }
+
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: process.env.SF_CLIENT_ID,
     redirect_uri: process.env.SF_CALLBACK_URL,
     scope: 'api full refresh_token',
-    state: encodeURIComponent(instanceUrl)
+    state: encodeURIComponent(loginUrl)
   });
-  const authUrl = instanceUrl + '/services/oauth2/authorize?' + params.toString();
+  const authUrl = loginUrl + '/services/oauth2/authorize?' + params.toString();
+  console.log('Redirecting to:', authUrl);
   res.redirect(authUrl);
 });
 
@@ -50,10 +61,10 @@ app.get('/oauth/callback', async (req, res) => {
     return res.redirect('/?error=' + encodeURIComponent(error));
   }
 
-  const instanceUrl = decodeURIComponent(state || 'https://login.salesforce.com');
+  const loginUrl = decodeURIComponent(state || 'https://login.salesforce.com');
 
   try {
-    const tokenResponse = await axios.post(instanceUrl + '/services/oauth2/token', new URLSearchParams({
+    const tokenResponse = await axios.post(loginUrl + '/services/oauth2/token', new URLSearchParams({
       grant_type: 'authorization_code',
       client_id: process.env.SF_CLIENT_ID,
       client_secret: process.env.SF_CLIENT_SECRET,
@@ -86,10 +97,7 @@ app.get('/oauth/callback', async (req, res) => {
 // ——————————————————————————
 app.get('/api/auth/status', (req, res) => {
   if (req.session.sfAccessToken) {
-    res.json({
-      connected: true,
-      user: req.session.sfUserInfo
-    });
+    res.json({ connected: true, user: req.session.sfUserInfo });
   } else {
     res.json({ connected: false });
   }
@@ -116,11 +124,9 @@ app.post('/api/chat', async (req, res) => {
   const instanceUrl = req.session.sfInstanceUrl;
 
   try {
-    // Fetch Salesforce metadata
     let metadataContext = '';
 
     try {
-      // Get list of objects
       const describeResponse = await axios.get(
         instanceUrl + '/services/data/v57.0/sobjects/',
         { headers: { Authorization: 'Bearer ' + accessToken } }
@@ -134,7 +140,6 @@ app.post('/api/chat', async (req, res) => {
 
       metadataContext = 'Available Salesforce Objects: ' + objects + '\n\n';
 
-      // If user mentions a specific object, get its details
       const objectMatch = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
       if (objectMatch) {
         for (const objName of objectMatch.slice(0, 2)) {
@@ -155,22 +160,20 @@ app.post('/api/chat', async (req, res) => {
             metadataContext += 'Label: ' + objDescribe.data.label + '\n';
             metadataContext += 'Fields: ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
           } catch (e) {
-            // Object not found or no access, skip
+            // Object not found, skip
           }
         }
       }
     } catch (metaErr) {
       console.error('Metadata fetch error:', metaErr.message);
-      metadataContext = 'Unable to fetch metadata. ';
     }
 
-    // Call Claude
     const systemPrompt = `You are a Salesforce design specification expert. Based on the Salesforce metadata provided, generate detailed, structured design specifications.
 
 When creating design specs include:
 - Object overview and purpose
 - Field specifications (type, validation, required/optional)
-- UI/UX recommendations  
+- UI/UX recommendations
 - Business rules and logic
 - Relationships and dependencies
 - Security considerations
@@ -192,9 +195,6 @@ ${metadataContext}`;
   }
 });
 
-// ——————————————————————————
-// START SERVER
-// ——————————————————————————
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

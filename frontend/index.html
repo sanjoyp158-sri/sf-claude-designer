@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SF Claude Designer</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+
+  <!-- LOGIN MODAL -->
+  <div id="loginModal" class="modal-overlay active">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="logo-area">
+          <div class="sf-logo">&#9729;</div>
+          <h2>SF Claude Designer</h2>
+          <p>Connect your Salesforce org to get AI-powered design specs</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="sfUsername">Salesforce Username</label>
+          <input type="email" id="sfUsername" placeholder="user@example.com" />
+        </div>
+        <div class="form-group">
+          <label for="sfPassword">Password</label>
+          <input type="password" id="sfPassword" placeholder="Your Salesforce password" />
+        </div>
+        <div class="form-group">
+          <label for="sfToken">Security Token <span class="optional">(optional)</span></label>
+          <input type="password" id="sfToken" placeholder="Your security token" />
+        </div>
+        <div class="form-group checkbox-group">
+          <input type="checkbox" id="isSandbox" />
+          <label for="isSandbox">This is a Sandbox org</label>
+        </div>
+        <div id="loginError" class="error-msg hidden"></div>
+        <button id="loginBtn" class="btn-primary" onclick="handleLogin()">
+          <span id="loginBtnText">Connect to Salesforce</span>
+          <span id="loginSpinner" class="spinner hidden"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN CHAT APP -->
+  <div id="mainApp" class="hidden">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="sf-icon">&#9729;</div>
+        <div>
+          <h1>SF Claude Designer</h1>
+          <span id="connectedUser" class="connected-badge"></span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div id="connectionStatus" class="status-badge connected">
+          <span class="status-dot"></span>
+          <span>Connected</span>
+        </div>
+        <button class="btn-logout" onclick="handleLogout()">Disconnect</button>
+      </div>
+    </header>
+
+    <!-- Main Layout -->
+    <div class="main-layout">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h3>Quick Prompts</h3>
+        </div>
+        <div class="quick-prompts">
+          <button class="prompt-btn" onclick="insertPrompt('Generate a design spec for the Account object')">
+            &#128196; Account Design Spec
+          </button>
+          <button class="prompt-btn" onclick="insertPrompt('Analyze the Opportunity object and list all fields with their types')">
+            &#128200; Opportunity Analysis
+          </button>
+          <button class="prompt-btn" onclick="insertPrompt('Generate a design spec for Contact object including all relationships')">
+            &#128101; Contact Design Spec
+          </button>
+          <button class="prompt-btn" onclick="insertPrompt('What custom fields exist on the Lead object and what are their purposes?')">
+            &#128161; Lead Custom Fields
+          </button>
+          <button class="prompt-btn" onclick="insertPrompt('Create a data model diagram description for Account, Contact and Opportunity')">
+            &#128204; Data Model Overview
+          </button>
+          <button class="prompt-btn" onclick="insertPrompt('What validations and automation would you recommend for the Case object?')">
+            &#9889; Case Recommendations
+          </button>
+        </div>
+        <div class="sidebar-section">
+          <h3>Objects in Org</h3>
+          <button class="btn-secondary" onclick="loadObjects()">Load Objects</button>
+          <div id="objectsList" class="objects-list"></div>
+        </div>
+      </aside>
+
+      <!-- Chat Area -->
+      <main class="chat-area">
+        <div id="chatMessages" class="chat-messages">
+          <div class="welcome-message">
+            <div class="welcome-icon">&#129302;</div>
+            <h2>Welcome to SF Claude Designer!</h2>
+            <p>I'm connected to your Salesforce org. Ask me anything about your objects, fields, relationships, or request a design specification.</p>
+            <div class="example-questions">
+              <p><strong>Try asking:</strong></p>
+              <ul>
+                <li>"Generate a complete design spec for the Account object"</li>
+                <li>"What are all the fields on the Opportunity object?"</li>
+                <li>"Describe the relationship between Account, Contact and Opportunity"</li>
+                <li>"What custom objects exist in my org?"</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="chat-input-area">
+          <div class="input-container">
+            <textarea
+              id="chatInput"
+              placeholder="Ask about your Salesforce metadata or request a design spec... (Shift+Enter for new line)"
+              rows="1"
+              onkeydown="handleKeyDown(event)"
+              oninput="autoResize(this)"
+            ></textarea>
+            <button id="sendBtn" class="send-btn" onclick="sendMessage()">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </div>
+          <p class="input-hint">Powered by Claude AI &middot; Reading live Salesforce metadata</p>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

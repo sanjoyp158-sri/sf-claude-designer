@@ -7,55 +7,66 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app-container">
-    <header class="app-header">
-      <div class="header-left">
-        <h1>SF Claude Designer</h1>
-        <span id="authStatus" class="auth-status disconnected">Not connected</span>
-        <span id="userInfo" class="user-info" style="display:none;"></span>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <div class="sf-logo">☁</div>
+        <div>
+          <div class="header-title">SF Claude Designer</div>
+          <div class="header-subtitle">AI-powered Salesforce design specs</div>
+        </div>
       </div>
-      <div class="header-right">
-        <button id="loginBtn" class="btn btn-primary">Login to Salesforce</button>
-        <button id="logoutBtn" class="btn btn-secondary" style="display:none;">Logout</button>
+      <div class="header-actions">
+        <span id="authStatus" class="auth-status disconnected">● Not connected</span>
+        <span id="userInfo" class="user-name" style="display:none"></span>
+        <button id="loginBtn" class="btn-login">Login to Salesforce</button>
+        <button id="logoutBtn" class="btn-logout" style="display:none">Logout</button>
       </div>
     </header>
 
-    <div class="chat-container">
-      <div id="chatMessages" class="chat-messages"></div>
-      <div class="chat-input-area">
-        <textarea id="chatInput" class="chat-input" placeholder="Login to Salesforce to start chatting..." disabled rows="2"></textarea>
-        <button id="sendBtn" class="btn btn-send" disabled>Send</button>
+    <!-- Login status bar -->
+    <div id="loginStatus" class="login-status" style="display:none"></div>
+
+    <!-- Chat -->
+    <div class="chat-area">
+      <div id="chatMessages" class="messages"></div>
+      <div class="input-row">
+        <textarea id="chatInput" class="chat-input"
+          placeholder="Login to Salesforce to start chatting..."
+          disabled rows="2"></textarea>
+        <button id="sendBtn" class="btn-send" disabled>Send</button>
       </div>
     </div>
+
   </div>
 
-  <!-- Login Modal -->
-  <div id="loginModal" class="modal" style="display:none;">
-    <div class="modal-content">
-      <h2>Connect to Salesforce</h2>
-      <p>Select your Salesforce org type:</p>
-      <div class="org-buttons">
-        <button id="btnProduction" class="org-btn btn-org-primary">
-          🏢 Production
+  <!-- Org Type Modal -->
+  <div id="orgModal" class="overlay" style="display:none">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-icon">☁</div>
+        <h2>Connect to Salesforce</h2>
+        <p>Select your org type. Salesforce login will open in a popup window.</p>
+      </div>
+      <div class="modal-body">
+        <button id="btnProduction" class="org-card">
+          <div class="org-card-icon">🏢</div>
+          <div class="org-card-text">
+            <strong>Production</strong>
+            <span>login.salesforce.com</span>
+          </div>
         </button>
-        <button id="btnSandbox" class="org-btn btn-org-secondary">
-          🧪 Sandbox
+        <button id="btnSandbox" class="org-card">
+          <div class="org-card-icon">🧪</div>
+          <div class="org-card-text">
+            <strong>Sandbox</strong>
+            <span>test.salesforce.com</span>
+          </div>
         </button>
       </div>
-      <div class="custom-domain-section">
-        <p class="or-divider">— or use My Domain (custom URL) —</p>
-        <div class="custom-domain-input-row">
-          <input
-            type="text"
-            id="customDomainInput"
-            class="domain-input"
-            placeholder="e.g. cognizant39.my.salesforce.com"
-          />
-          <button id="btnCustomDomain" class="org-btn btn-org-custom">Connect</button>
-        </div>
-      </div>
-      <p class="modal-note">You will be redirected to Salesforce to login securely.</p>
-      <button id="cancelLogin" class="btn btn-link">Cancel</button>
+      <button id="cancelOrgModal" class="btn-cancel">Cancel</button>
     </div>
   </div>
 

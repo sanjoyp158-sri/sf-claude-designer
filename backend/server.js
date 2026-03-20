@@ -8,10 +8,8 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// Middleware
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(session({
@@ -20,23 +18,25 @@ app.use(session({
   saveUninitialized: false,
   cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
 }));
-
-// Serve frontend static files
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ——————————————————————————
 // ROUTE: Initiate Salesforce OAuth Login
 // ——————————————————————————
 app.get('/auth/salesforce', (req, res) => {
-  // Use the org's My Domain URL directly — required for External Client Apps
   const orgType = req.query.org_type || 'production';
   let loginUrl;
+
   if (orgType === 'sandbox') {
     loginUrl = 'https://test.salesforce.com';
-  } else if (process.env.SF_LOGIN_URL) {
-    loginUrl = process.env.SF_LOGIN_URL;
+  } else if (orgType === 'custom' && req.query.instance_url) {
+    // User provided their My Domain URL
+    loginUrl = req.query.instance_url;
+    // Ensure it doesn't end with slash
+    if (loginUrl.endsWith('/')) loginUrl = loginUrl.slice(0, -1);
   } else {
-    loginUrl = 'https://login.salesforce.com';
+    // Production: use env var if set, otherwise login.salesforce.com
+    loginUrl = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
   }
 
   const params = new URLSearchParams({
@@ -46,8 +46,9 @@ app.get('/auth/salesforce', (req, res) => {
     scope: 'api full refresh_token',
     state: encodeURIComponent(loginUrl)
   });
+
   const authUrl = loginUrl + '/services/oauth2/authorize?' + params.toString();
-  console.log('Redirecting to:', authUrl);
+  console.log('OAuth redirect to:', authUrl);
   res.redirect(authUrl);
 });
 
@@ -56,27 +57,23 @@ app.get('/auth/salesforce', (req, res) => {
 // ——————————————————————————
 app.get('/oauth/callback', async (req, res) => {
   const { code, state, error } = req.query;
-
-  if (error) {
-    return res.redirect('/?error=' + encodeURIComponent(error));
-  }
+  if (error) return res.redirect('/?error=' + encodeURIComponent(error));
 
   const loginUrl = decodeURIComponent(state || 'https://login.salesforce.com');
 
   try {
-    const tokenResponse = await axios.post(loginUrl + '/services/oauth2/token', new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: process.env.SF_CLIENT_ID,
-      client_secret: process.env.SF_CLIENT_SECRET,
-      redirect_uri: process.env.SF_CALLBACK_URL,
-      code: code
-    }), {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
+    const tokenResponse = await axios.post(loginUrl + '/services/oauth2/token',
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: process.env.SF_CLIENT_ID,
+        client_secret: process.env.SF_CLIENT_SECRET,
+        redirect_uri: process.env.SF_CALLBACK_URL,
+        code
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
 
     const { access_token, instance_url } = tokenResponse.data;
-
-    // Get user info
     const userInfo = await axios.get(instance_url + '/services/oauth2/userinfo', {
       headers: { Authorization: 'Bearer ' + access_token }
     });
@@ -87,13 +84,14 @@ app.get('/oauth/callback', async (req, res) => {
 
     res.redirect('/?connected=true');
   } catch (err) {
-    console.error('OAuth callback error:', err.response?.data || err.message);
-    res.redirect('/?error=' + encodeURIComponent('Authentication failed: ' + (err.response?.data?.error_description || err.message)));
+    console.error('OAuth error:', err.response?.data || err.message);
+    const msg = err.response?.data?.error_description || err.message;
+    res.redirect('/?error=' + encodeURIComponent(msg));
   }
 });
 
 // ——————————————————————————
-// ROUTE: Check Auth Status
+// ROUTE: Auth Status
 // ——————————————————————————
 app.get('/api/auth/status', (req, res) => {
   if (req.session.sfAccessToken) {
@@ -131,13 +129,9 @@ app.post('/api/chat', async (req, res) => {
         instanceUrl + '/services/data/v57.0/sobjects/',
         { headers: { Authorization: 'Bearer ' + accessToken } }
       );
-
       const objects = describeResponse.data.sobjects
-        .filter(obj => obj.queryable && obj.createable)
-        .slice(0, 30)
-        .map(obj => obj.name)
-        .join(', ');
-
+        .filter(o => o.queryable && o.createable)
+        .slice(0, 30).map(o => o.name).join(', ');
       metadataContext = 'Available Salesforce Objects: ' + objects + '\n\n';
 
       const objectMatch = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
@@ -148,37 +142,24 @@ app.post('/api/chat', async (req, res) => {
               instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/',
               { headers: { Authorization: 'Bearer ' + accessToken } }
             );
-
             const fields = objDescribe.data.fields.map(f => ({
-              name: f.name,
-              label: f.label,
-              type: f.type,
+              name: f.name, label: f.label, type: f.type,
               required: !f.nillable && !f.defaultedOnCreate
             }));
-
-            metadataContext += 'Object: ' + objName + '\n';
-            metadataContext += 'Label: ' + objDescribe.data.label + '\n';
+            metadataContext += 'Object: ' + objName + '\nLabel: ' + objDescribe.data.label + '\n';
             metadataContext += 'Fields: ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
-          } catch (e) {
-            // Object not found, skip
-          }
+          } catch (e) { /* skip */ }
         }
       }
-    } catch (metaErr) {
-      console.error('Metadata fetch error:', metaErr.message);
+    } catch (e) {
+      console.error('Metadata error:', e.message);
     }
 
     const systemPrompt = `You are a Salesforce design specification expert. Based on the Salesforce metadata provided, generate detailed, structured design specifications.
 
-When creating design specs include:
-- Object overview and purpose
-- Field specifications (type, validation, required/optional)
-- UI/UX recommendations
-- Business rules and logic
-- Relationships and dependencies
-- Security considerations
+Include: Object overview, Field specs (type, validation, required/optional), UI/UX recommendations, Business rules, Relationships, Security considerations.
 
-Salesforce Metadata Context:
+Salesforce Metadata:
 ${metadataContext}`;
 
     const claudeResponse = await anthropic.messages.create({
@@ -191,10 +172,8 @@ ${metadataContext}`;
     res.json({ response: claudeResponse.content[0].text });
   } catch (err) {
     console.error('Chat error:', err.message);
-    res.status(500).json({ error: 'Error processing request: ' + err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

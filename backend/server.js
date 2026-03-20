@@ -21,23 +21,13 @@ app.use(session({
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ——————————————————————————
-// ROUTE: Initiate Salesforce OAuth Login
+// ROUTE: Get OAuth URL for popup
 // ——————————————————————————
-app.get('/auth/salesforce', (req, res) => {
+app.get('/auth/url', (req, res) => {
   const orgType = req.query.org_type || 'production';
-  let loginUrl;
-
-  if (orgType === 'sandbox') {
-    loginUrl = 'https://test.salesforce.com';
-  } else if (orgType === 'custom' && req.query.instance_url) {
-    // User provided their My Domain URL
-    loginUrl = req.query.instance_url;
-    // Ensure it doesn't end with slash
-    if (loginUrl.endsWith('/')) loginUrl = loginUrl.slice(0, -1);
-  } else {
-    // Production: use env var if set, otherwise login.salesforce.com
-    loginUrl = process.env.SF_LOGIN_URL || 'https://login.salesforce.com';
-  }
+  const loginUrl = orgType === 'sandbox'
+    ? 'https://test.salesforce.com'
+    : 'https://login.salesforce.com';
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -47,22 +37,28 @@ app.get('/auth/salesforce', (req, res) => {
     state: encodeURIComponent(loginUrl)
   });
 
-  const authUrl = loginUrl + '/services/oauth2/authorize?' + params.toString();
-  console.log('OAuth redirect to:', authUrl);
-  res.redirect(authUrl);
+  res.json({ url: loginUrl + '/services/oauth2/authorize?' + params.toString() });
 });
 
 // ——————————————————————————
-// ROUTE: OAuth Callback
+// ROUTE: OAuth Callback (called after Salesforce login in popup)
 // ——————————————————————————
 app.get('/oauth/callback', async (req, res) => {
-  const { code, state, error } = req.query;
-  if (error) return res.redirect('/?error=' + encodeURIComponent(error));
+  const { code, state, error, error_description } = req.query;
+
+  if (error) {
+    // Send HTML that closes popup and sends error to parent
+    return res.send(`<!DOCTYPE html><html><body><script>
+      window.opener && window.opener.postMessage({ type: 'SF_AUTH_ERROR', error: '${error_description || error}' }, '*');
+      window.close();
+    </script></body></html>`);
+  }
 
   const loginUrl = decodeURIComponent(state || 'https://login.salesforce.com');
 
   try {
-    const tokenResponse = await axios.post(loginUrl + '/services/oauth2/token',
+    const tokenRes = await axios.post(
+      loginUrl + '/services/oauth2/token',
       new URLSearchParams({
         grant_type: 'authorization_code',
         client_id: process.env.SF_CLIENT_ID,
@@ -73,20 +69,33 @@ app.get('/oauth/callback', async (req, res) => {
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
 
-    const { access_token, instance_url } = tokenResponse.data;
-    const userInfo = await axios.get(instance_url + '/services/oauth2/userinfo', {
+    const { access_token, instance_url } = tokenRes.data;
+
+    // Get user info
+    const userRes = await axios.get(instance_url + '/services/oauth2/userinfo', {
       headers: { Authorization: 'Bearer ' + access_token }
     });
 
     req.session.sfAccessToken = access_token;
     req.session.sfInstanceUrl = instance_url;
-    req.session.sfUserInfo = userInfo.data;
+    req.session.sfUserInfo = userRes.data;
 
-    res.redirect('/?connected=true');
+    // Send HTML that closes popup and notifies parent window
+    res.send(`<!DOCTYPE html><html><body><script>
+      window.opener && window.opener.postMessage({
+        type: 'SF_AUTH_SUCCESS',
+        user: ${JSON.stringify({ name: userRes.data.name, email: userRes.data.email })}
+      }, '*');
+      window.close();
+    </script><p>Login successful! Closing...</p></body></html>`);
+
   } catch (err) {
     console.error('OAuth error:', err.response?.data || err.message);
     const msg = err.response?.data?.error_description || err.message;
-    res.redirect('/?error=' + encodeURIComponent(msg));
+    res.send(`<!DOCTYPE html><html><body><script>
+      window.opener && window.opener.postMessage({ type: 'SF_AUTH_ERROR', error: '${msg.replace(/'/g, "\\'")}' }, '*');
+      window.close();
+    </script><p>Login failed: ${msg}</p></body></html>`);
   }
 });
 
@@ -110,7 +119,7 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // ——————————————————————————
-// ROUTE: Chat with Claude
+// ROUTE: Chat
 // ——————————————————————————
 app.post('/api/chat', async (req, res) => {
   if (!req.session.sfAccessToken) {
@@ -125,51 +134,46 @@ app.post('/api/chat', async (req, res) => {
     let metadataContext = '';
 
     try {
-      const describeResponse = await axios.get(
-        instanceUrl + '/services/data/v57.0/sobjects/',
-        { headers: { Authorization: 'Bearer ' + accessToken } }
-      );
-      const objects = describeResponse.data.sobjects
+      const descRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/', {
+        headers: { Authorization: 'Bearer ' + accessToken }
+      });
+      const objects = descRes.data.sobjects
         .filter(o => o.queryable && o.createable)
         .slice(0, 30).map(o => o.name).join(', ');
       metadataContext = 'Available Salesforce Objects: ' + objects + '\n\n';
 
-      const objectMatch = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
-      if (objectMatch) {
-        for (const objName of objectMatch.slice(0, 2)) {
+      const matches = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
+      if (matches) {
+        for (const objName of matches.slice(0, 2)) {
           try {
-            const objDescribe = await axios.get(
+            const objRes = await axios.get(
               instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/',
               { headers: { Authorization: 'Bearer ' + accessToken } }
             );
-            const fields = objDescribe.data.fields.map(f => ({
+            const fields = objRes.data.fields.map(f => ({
               name: f.name, label: f.label, type: f.type,
               required: !f.nillable && !f.defaultedOnCreate
             }));
-            metadataContext += 'Object: ' + objName + '\nLabel: ' + objDescribe.data.label + '\n';
-            metadataContext += 'Fields: ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
-          } catch (e) { /* skip */ }
+            metadataContext += 'Object: ' + objName + '\nLabel: ' + objRes.data.label + '\n';
+            metadataContext += 'Fields (first 50): ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
+          } catch (e) { /* skip unknown objects */ }
         }
       }
     } catch (e) {
       console.error('Metadata error:', e.message);
     }
 
-    const systemPrompt = `You are a Salesforce design specification expert. Based on the Salesforce metadata provided, generate detailed, structured design specifications.
-
-Include: Object overview, Field specs (type, validation, required/optional), UI/UX recommendations, Business rules, Relationships, Security considerations.
-
-Salesforce Metadata:
-${metadataContext}`;
-
-    const claudeResponse = await anthropic.messages.create({
+    const claudeRes = await anthropic.messages.create({
       model: 'claude-opus-4-5',
       max_tokens: 2000,
-      messages: [{ role: 'user', content: message }],
-      system: systemPrompt
+      system: `You are a Salesforce design specification expert. Based on the metadata provided, generate detailed design specs including: object overview, field specs (type/validation/required), UI/UX recommendations, business rules, relationships, and security considerations.
+
+Salesforce Metadata:
+${metadataContext}`,
+      messages: [{ role: 'user', content: message }]
     });
 
-    res.json({ response: claudeResponse.content[0].text });
+    res.json({ response: claudeRes.content[0].text });
   } catch (err) {
     console.error('Chat error:', err.message);
     res.status(500).json({ error: err.message });

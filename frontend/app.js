@@ -11,7 +11,6 @@ const userInfo = document.getElementById('userInfo');
 
 let isConnected = false;
 
-// Check auth status on page load
 async function checkAuthStatus() {
   try {
     const response = await fetch('/api/auth/status', { credentials: 'include' });
@@ -40,10 +39,9 @@ function setConnected(user) {
   sendBtn.disabled = false;
   chatInput.placeholder = 'Ask about Salesforce objects, metadata, design specs...';
 
-  // Check for URL params
   const params = new URLSearchParams(window.location.search);
   if (params.get('connected') === 'true') {
-    addMessage('assistant', 'Successfully connected to Salesforce! You can now ask me to generate design specs for any Salesforce object. Try: "Generate a design spec for the Account object"');
+    addMessage('assistant', '✅ Successfully connected to Salesforce! You can now ask me to generate design specs for any Salesforce object.\n\nTry asking: "Generate a design spec for the Account object"');
     window.history.replaceState({}, '', '/');
   }
 }
@@ -62,48 +60,59 @@ function setDisconnected() {
   const params = new URLSearchParams(window.location.search);
   const error = params.get('error');
   if (error) {
-    addMessage('assistant', 'Login failed: ' + decodeURIComponent(error) + '. Please try again.');
+    addMessage('assistant', '❌ Login failed: ' + decodeURIComponent(error) + '\n\nPlease try again.');
     window.history.replaceState({}, '', '/');
   }
 }
 
-// Login button - show modal to select org type
 loginBtn.addEventListener('click', () => {
   loginModal.style.display = 'flex';
 });
 
-// Close modal on backdrop click
 loginModal.addEventListener('click', (e) => {
   if (e.target === loginModal) loginModal.style.display = 'none';
 });
 
-// Handle org selection buttons in modal
 document.addEventListener('click', (e) => {
-  if (e.target.classList.contains('org-btn')) {
-    const instanceUrl = e.target.dataset.url;
+  // Production org button
+  if (e.target.id === 'btnProduction') {
     loginModal.style.display = 'none';
-    window.location.href = '/auth/salesforce?instance_url=' + encodeURIComponent(instanceUrl);
+    window.location.href = '/auth/salesforce?org_type=production';
+  }
+  // Sandbox org button
+  if (e.target.id === 'btnSandbox') {
+    loginModal.style.display = 'none';
+    window.location.href = '/auth/salesforce?org_type=sandbox';
+  }
+  // Custom domain button
+  if (e.target.id === 'btnCustomDomain') {
+    const customUrl = document.getElementById('customDomainInput').value.trim();
+    if (!customUrl) {
+      alert('Please enter your org domain URL');
+      return;
+    }
+    // Ensure it starts with https://
+    const url = customUrl.startsWith('http') ? customUrl : 'https://' + customUrl;
+    loginModal.style.display = 'none';
+    window.location.href = '/auth/salesforce?org_type=custom&instance_url=' + encodeURIComponent(url);
   }
   if (e.target.id === 'cancelLogin') {
     loginModal.style.display = 'none';
   }
 });
 
-// Logout
 logoutBtn.addEventListener('click', async () => {
   await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
   setDisconnected();
   addMessage('assistant', 'Logged out from Salesforce.');
 });
 
-// Send message
 async function sendMessage() {
   const message = chatInput.value.trim();
   if (!message || !isConnected) return;
 
   chatInput.value = '';
   addMessage('user', message);
-
   const typingId = addMessage('assistant', '...', true);
 
   try {
@@ -118,18 +127,18 @@ async function sendMessage() {
     removeMessage(typingId);
 
     if (data.error) {
-      addMessage('assistant', 'Error: ' + data.error);
+      addMessage('assistant', '❌ Error: ' + data.error);
     } else {
       addMessage('assistant', data.response);
     }
   } catch (err) {
     removeMessage(typingId);
-    addMessage('assistant', 'Error: Could not connect to server. Please check if the server is running.');
+    addMessage('assistant', '❌ Error: Could not connect to server.');
   }
 }
 
 function addMessage(role, content, isTyping = false) {
-  const id = 'msg-' + Date.now();
+  const id = 'msg-' + Date.now() + '-' + Math.random();
   const msgDiv = document.createElement('div');
   msgDiv.className = 'message ' + role;
   msgDiv.id = id;
@@ -167,6 +176,5 @@ chatInput.addEventListener('keypress', (e) => {
   }
 });
 
-// Initialize
 checkAuthStatus();
 addMessage('assistant', 'Welcome to SF Claude Designer! Click "Login to Salesforce" to connect your org and start generating design specs.');

@@ -1,5 +1,4 @@
 // SF Claude Designer - Frontend App Logic
-
 document.addEventListener('DOMContentLoaded', () => {
   // Elements
   const loginSection = document.getElementById('loginSection');
@@ -24,9 +23,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastMessage = '';
   let lastResponse = '';
 
-  // ——————————————————
+  // ——————————————
   // Toggle password visibility
-  // ——————————————————
+  // ——————————————
   if (togglePw && sfPassword) {
     togglePw.addEventListener('click', () => {
       sfPassword.type = sfPassword.type === 'password' ? 'text' : 'password';
@@ -34,11 +33,10 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // ——————————————————
+  // ——————————————
   // Check if already logged in
-  // ——————————————————
+  // ——————————————
   checkAuthStatus();
-
   async function checkAuthStatus() {
     try {
       const res = await fetch('/api/auth/status', { credentials: 'include' });
@@ -47,21 +45,18 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) { console.error('Auth check failed:', e); }
   }
 
-  // ——————————————————
+  // ——————————————
   // LOGIN FORM SUBMIT
-  // ——————————————————
+  // ——————————————
   loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const username = document.getElementById('sfUsername').value.trim();
     const password = document.getElementById('sfPassword').value;
     const securityToken = document.getElementById('sfToken').value.trim();
     const orgType = document.querySelector('input[name="orgType"]:checked').value;
-
     if (!username || !password) { showError('Please enter your username and password.'); return; }
-
     setLoading(true);
     hideError();
-
     try {
       const res = await fetch('/api/login', {
         method: 'POST',
@@ -79,17 +74,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ——————————————————
+  // ——————————————
   // LOGOUT
-  // ——————————————————
+  // ——————————————
   logoutBtn.addEventListener('click', async () => {
     try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); } catch (e) {}
     showLogin();
   });
 
-  // ——————————————————
+  // ——————————————
   // CHAT - Send message
-  // ——————————————————
+  // ——————————————
   sendBtn.addEventListener('click', sendMessage);
   userInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -98,12 +93,10 @@ document.addEventListener('DOMContentLoaded', () => {
   async function sendMessage() {
     const message = userInput.value.trim();
     if (!message) return;
-
     addMessage(message, 'user');
     userInput.value = '';
     sendBtn.disabled = true;
     hideExportButtons();
-
     const typingId = addTyping();
 
     try {
@@ -121,6 +114,15 @@ document.addEventListener('DOMContentLoaded', () => {
         lastResponse = data.response;
         addMessage(data.response, 'bot');
         showExportButtons();
+
+        // Auto-trigger export if user explicitly asked for a Word or Excel document
+        if (data.exportIntent && data.exportIntent.isWord) {
+          addSystemMessage('📄 Generating your Word document...');
+          await triggerExport('word');
+        } else if (data.exportIntent && data.exportIntent.isExcel) {
+          addSystemMessage('📊 Generating your Excel file...');
+          await triggerExport('excel');
+        }
       } else if (res.status === 401) {
         addMessage('Your session expired. Please log in again.', 'error');
         setTimeout(showLogin, 2000);
@@ -135,87 +137,69 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ——————————————————
-  // EXPORT TO WORD
-  // ——————————————————
+  // ——————————————
+  // SHARED EXPORT FUNCTION
+  // ——————————————
+  async function triggerExport(type) {
+    const endpoint = type === 'word' ? '/api/export/word' : '/api/export/excel';
+    const ext = type === 'word' ? 'docx' : 'xlsx';
+    const btn = type === 'word' ? exportWordBtn : exportExcelBtn;
+
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating...'; }
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ message: lastMessage, content: lastResponse })
+      });
+
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'SF_Design_Spec_' + new Date().toISOString().slice(0, 10) + '.' + ext;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        addSystemMessage('✅ ' + (type === 'word' ? 'Word document' : 'Excel file') + ' downloaded successfully!');
+      } else {
+        const err = await res.json();
+        addSystemMessage('❌ Export failed: ' + err.error);
+      }
+    } catch (e) {
+      addSystemMessage('❌ Export error: ' + e.message);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = type === 'word' ? '📄 Export Word' : '📊 Export Excel';
+      }
+    }
+  }
+
+  // ——————————————
+  // EXPORT BUTTONS (manual)
+  // ——————————————
   if (exportWordBtn) {
     exportWordBtn.addEventListener('click', async () => {
       if (!lastResponse) return;
-      exportWordBtn.disabled = true;
-      exportWordBtn.textContent = '⏳ Generating...';
-      try {
-        const res = await fetch('/api/export/word', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ message: lastMessage, content: lastResponse })
-        });
-        if (res.ok) {
-          const blob = await res.blob();
-          const url = window.URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'SF_Design_Spec_' + new Date().toISOString().slice(0,10) + '.docx';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
-          addSystemMessage('✅ Word document downloaded successfully!');
-        } else {
-          const err = await res.json();
-          addSystemMessage('❌ Word export failed: ' + err.error);
-        }
-      } catch (e) {
-        addSystemMessage('❌ Export error: ' + e.message);
-      } finally {
-        exportWordBtn.disabled = false;
-        exportWordBtn.textContent = '📄 Export Word';
-      }
+      await triggerExport('word');
     });
   }
 
-  // ——————————————————
-  // EXPORT TO EXCEL
-  // ——————————————————
   if (exportExcelBtn) {
     exportExcelBtn.addEventListener('click', async () => {
       if (!lastResponse) return;
-      exportExcelBtn.disabled = true;
-      exportExcelBtn.textContent = '⏳ Generating...';
-      try {
-        const res = await fetch('/api/export/excel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ message: lastMessage, content: lastResponse })
-        });
-        if (res.ok) {
-          const blob = await res.blob();
-          const url = window.URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'SF_Design_Spec_' + new Date().toISOString().slice(0,10) + '.xlsx';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
-          addSystemMessage('✅ Excel document downloaded successfully!');
-        } else {
-          const err = await res.json();
-          addSystemMessage('❌ Excel export failed: ' + err.error);
-        }
-      } catch (e) {
-        addSystemMessage('❌ Export error: ' + e.message);
-      } finally {
-        exportExcelBtn.disabled = false;
-        exportExcelBtn.textContent = '📊 Export Excel';
-      }
+      await triggerExport('excel');
     });
   }
 
-  // ——————————————————
+  // ——————————————
   // UI Helpers
-  // ——————————————————
+  // ——————————————
   function showChat(user) {
     loginSection.classList.add('hidden');
     chatSection.classList.remove('hidden');
@@ -298,5 +282,8 @@ document.addEventListener('DOMContentLoaded', () => {
     return id;
   }
 
-  function removeTyping(id) { const el = document.getElementById(id); if (el) el.remove(); }
+  function removeTyping(id) {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  }
 });

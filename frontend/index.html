@@ -3,115 +3,138 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SF Claude Designer</title>
+  <title>RAPID-5&#8482; | Powered by Cognizant</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- HEADER -->
-  <header class="app-header">
-    <div class="header-content">
-      <div class="header-brand">
-        <span class="sf-icon">☁️</span>
-        <span class="header-title">SF Claude Designer</span>
+
+<!-- HEADER -->
+<header class="app-header">
+  <div class="header-content">
+    <div class="header-brand">
+      <img
+        src="https://www.cognizant.com/us/en/media_1808da395be9f77c0124de824530b0338915414a8.svg"
+        alt="Cognizant"
+        class="cognizant-logo"
+        onerror="this.style.display='none'; document.getElementById('cogFallback').style.display='flex';"
+      >
+      <span id="cogFallback" class="cog-fallback" style="display:none;">
+        <span class="cog-dot c1"></span><span class="cog-dot c2"></span><span class="cog-dot c3"></span>
+        <span class="cog-name">cognizant</span>
+      </span>
+      <div class="header-divider"></div>
+      <span class="header-title">RAPID-5&#8482;</span>
+    </div>
+    <div id="userInfo" class="user-info hidden">
+      <span id="userName" class="user-name"></span>
+      <button id="logoutBtn" class="btn-logout">Logout</button>
+    </div>
+  </div>
+</header>
+
+<!-- LOGIN SECTION -->
+<div id="loginSection" class="login-section">
+  <div class="login-card">
+    <div class="login-logo">
+      <img
+        src="https://www.cognizant.com/us/en/media_1808da395be9f77c0124de824530b0338915414a8.svg"
+        alt="Cognizant"
+        class="login-cognizant-logo"
+        onerror="this.style.display='none';"
+      >
+      <h2>RAPID-5&#8482;</h2>
+      <p>Connect to Salesforce to generate design specifications</p>
+    </div>
+
+    <form id="loginForm" class="login-form">
+      <!-- Org Type Selection -->
+      <div class="org-type-row">
+        <label class="org-radio">
+          <input type="radio" name="orgType" value="production" checked>
+          <span class="org-radio-label">&#x1F3E2; Production</span>
+        </label>
+        <label class="org-radio">
+          <input type="radio" name="orgType" value="sandbox">
+          <span class="org-radio-label">&#x1F9EA; Sandbox</span>
+        </label>
       </div>
-      <div id="userInfo" class="user-info hidden">
-        <span id="userName" class="user-name"></span>
-        <button id="logoutBtn" class="btn-logout">Logout</button>
+
+      <!-- Username -->
+      <div class="form-group">
+        <label for="sfUsername">Salesforce Username</label>
+        <input type="email" id="sfUsername" placeholder="user@example.com" required autocomplete="username">
+      </div>
+
+      <!-- Password -->
+      <div class="form-group">
+        <label for="sfPassword">Password</label>
+        <div class="password-wrapper">
+          <input type="password" id="sfPassword" placeholder="Your Salesforce password" required autocomplete="current-password">
+          <button type="button" class="toggle-pw" id="togglePw" title="Show/Hide password">&#x1F441;</button>
+        </div>
+      </div>
+
+      <!-- Security Token -->
+      <div class="form-group">
+        <label for="sfToken">
+          Security Token
+          <span class="label-hint">(required if IP not trusted)</span>
+        </label>
+        <input type="password" id="sfToken" placeholder="Your security token (optional)" autocomplete="off">
+      </div>
+
+      <!-- Error message -->
+      <div id="loginError" class="login-error hidden"></div>
+
+      <!-- Submit -->
+      <button type="submit" id="loginBtn" class="btn-login">
+        <span id="loginBtnText">Connect to Salesforce</span>
+        <span id="loginSpinner" class="spinner hidden"></span>
+      </button>
+    </form>
+
+    <div class="login-footer">
+      <a href="https://help.salesforce.com/s/articleView?id=sf.user_security_token.htm" target="_blank" rel="noopener">
+        How to get your Security Token?
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- CHAT SECTION (hidden until logged in) -->
+<div id="chatSection" class="chat-section hidden">
+  <div class="chat-container">
+    <div class="chat-header">
+      <h3>Salesforce Design Spec Generator</h3>
+      <p class="chat-subtitle">Ask about any Salesforce object or requirement to get design specifications</p>
+    </div>
+
+    <div id="chatMessages" class="chat-messages">
+      <div class="welcome-message">
+        <div class="bot-bubble">
+          &#x1F44B; Hello! I'm connected to your Salesforce org. Ask me to generate design specs for any object or requirement.<br><br>
+          <strong>Examples:</strong><br>
+          &bull; "Generate design spec for the Account object"<br>
+          &bull; "Create a word document for a new picklist field on Account"<br>
+          &bull; "Generate excel spec for Opportunity"
+        </div>
       </div>
     </div>
-  </header>
 
-  <!-- LOGIN SECTION -->
-  <div id="loginSection" class="login-section">
-    <div class="login-card">
-      <div class="login-logo">
-        <span class="sf-cloud-icon">☁️</span>
-        <h2>Connect to Salesforce</h2>
-        <p>Enter your Salesforce credentials to get started</p>
+    <div class="chat-input-area">
+      <div class="input-row">
+        <textarea id="userInput" placeholder="Describe your requirement or ask about a Salesforce object..." rows="2"></textarea>
+        <button id="sendBtn" class="btn-send">Send &#x27A4;</button>
       </div>
-
-      <form id="loginForm" class="login-form">
-        <!-- Org Type Selection -->
-        <div class="org-type-row">
-          <label class="org-radio">
-            <input type="radio" name="orgType" value="production" checked>
-            <span class="org-radio-label">🏢 Production</span>
-          </label>
-          <label class="org-radio">
-            <input type="radio" name="orgType" value="sandbox">
-            <span class="org-radio-label">🧪 Sandbox</span>
-          </label>
-        </div>
-
-        <!-- Username -->
-        <div class="form-group">
-          <label for="sfUsername">Salesforce Username</label>
-          <input type="email" id="sfUsername" placeholder="user@example.com" required autocomplete="username">
-        </div>
-
-        <!-- Password -->
-        <div class="form-group">
-          <label for="sfPassword">Password</label>
-          <div class="password-wrapper">
-            <input type="password" id="sfPassword" placeholder="Your Salesforce password" required autocomplete="current-password">
-            <button type="button" class="toggle-pw" id="togglePw" title="Show/Hide password">👁</button>
-          </div>
-        </div>
-
-        <!-- Security Token (collapsible) -->
-        <div class="form-group">
-          <label for="sfToken">
-            Security Token
-            <span class="label-hint">(required if IP not trusted)</span>
-          </label>
-          <input type="password" id="sfToken" placeholder="Your security token (optional)" autocomplete="off">
-        </div>
-
-        <!-- Error message -->
-        <div id="loginError" class="login-error hidden"></div>
-
-        <!-- Submit -->
-        <button type="submit" id="loginBtn" class="btn-login">
-          <span id="loginBtnText">Connect to Salesforce</span>
-          <span id="loginSpinner" class="spinner hidden"></span>
-        </button>
-      </form>
-
-      <div class="login-footer">
-        <a href="https://help.salesforce.com/s/articleView?id=sf.user_security_token.htm" target="_blank" rel="noopener">
-          How to get your Security Token?
-        </a>
+      <div class="export-row hidden" id="exportRow">
+        <span class="export-label">Download as:</span>
+        <button id="exportWordBtn" class="btn-export btn-word hidden">&#x1F4C4; Export Word</button>
+        <button id="exportExcelBtn" class="btn-export btn-excel hidden">&#x1F4CA; Export Excel</button>
       </div>
     </div>
   </div>
+</div>
 
-  <!-- CHAT SECTION (hidden until logged in) -->
-  <div id="chatSection" class="chat-section hidden">
-    <div class="chat-container">
-      <div class="chat-header">
-        <h3>Salesforce Design Spec Generator</h3>
-        <p class="chat-subtitle">Ask about any Salesforce object to get design specifications</p>
-      </div>
-
-      <div id="chatMessages" class="chat-messages">
-        <div class="welcome-message">
-          <div class="bot-bubble">
-            👋 Hello! I'm connected to your Salesforce org. Ask me to generate design specs for any object.<br><br>
-            <strong>Examples:</strong><br>
-            • "Generate design spec for the Account object"<br>
-            • "What fields does Contact have?"<br>
-            • "Design spec for Opportunity"
-          </div>
-        </div>
-      </div>
-
-      <div class="chat-input-area">
-        <textarea id="userInput" placeholder="Ask about a Salesforce object..." rows="2"></textarea>
-        <button id="sendBtn" class="btn-send">Send ➤</button>
-      </div>
-    </div>
-  </div>
-
-  <script src="app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

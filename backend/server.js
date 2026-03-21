@@ -21,68 +21,113 @@ app.use(session({
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ——————————————————————————
-// ROUTE: Login with Username + Password + Security Token
-// This uses the Salesforce OAuth Username-Password flow (no browser redirect needed)
+// HELPER: Login via Salesforce SOAP API
+// No Connected App needed — uses username + password + security token only
+// ——————————————————————————
+async function soapLogin(username, password, securityToken, orgType) {
+  const loginUrl = orgType === 'sandbox'
+    ? 'https://test.salesforce.com'
+    : 'https://login.salesforce.com';
+
+  const fullPassword = securityToken ? password + securityToken : password;
+
+  const soapBody = `<?xml version="1.0" encoding="utf-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:urn="urn:partner.soap.sforce.com">
+  <soapenv:Body>
+    <urn:login>
+      <urn:username>${username}</urn:username>
+      <urn:password>${fullPassword}</urn:password>
+    </urn:login>
+  </soapenv:Body>
+</soapenv:Envelope>`;
+
+  const response = await axios.post(
+    loginUrl + '/services/Soap/u/57.0',
+    soapBody,
+    {
+      headers: {
+        'Content-Type': 'text/xml',
+        'SOAPAction': 'login'
+      }
+    }
+  );
+
+  const xml = response.data;
+
+  // Check for SOAP fault (login error)
+  if (xml.includes('<faultstring>')) {
+    const faultMatch = xml.match(/<faultstring>(.*?)<\/faultstring>/s);
+    const fault = faultMatch ? faultMatch[1].trim() : 'Login failed';
+    throw new Error(fault);
+  }
+
+  // Extract sessionId and serverUrl
+  const sessionMatch = xml.match(/<sessionId>(.*?)<\/sessionId>/);
+  const serverUrlMatch = xml.match(/<serverUrl>(.*?)<\/serverUrl>/);
+  const userIdMatch = xml.match(/<userId>(.*?)<\/userId>/);
+  const userFullNameMatch = xml.match(/<userFullName>(.*?)<\/userFullName>/);
+  const userEmailMatch = xml.match(/<userEmail>(.*?)<\/userEmail>/);
+
+  if (!sessionMatch || !serverUrlMatch) {
+    throw new Error('Could not parse Salesforce login response');
+  }
+
+  const sessionId = sessionMatch[1];
+  const serverUrl = serverUrlMatch[1];
+
+  // Extract instance URL from serverUrl (e.g. https://cognizant39.my.salesforce.com/services/Soap/...)
+  const instanceUrl = serverUrl.match(/^(https:\/\/[^\/]+)/)[1];
+
+  return {
+    access_token: sessionId,
+    instance_url: instanceUrl,
+    user_id: userIdMatch ? userIdMatch[1] : null,
+    user_name: userFullNameMatch ? userFullNameMatch[1] : username,
+    user_email: userEmailMatch ? userEmailMatch[1] : ''
+  };
+}
+
+// ——————————————————————————
+// ROUTE: Login
 // ——————————————————————————
 app.post('/api/login', async (req, res) => {
   const { username, password, securityToken, orgType } = req.body;
 
   if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
+    return res.status(400).json({ error: 'Username and password are required.' });
   }
 
-  // For External Client Apps, use the org My Domain URL
-  // For sandbox, use test.salesforce.com
-  const loginUrl = orgType === 'sandbox'
-    ? 'https://test.salesforce.com'
-    : 'https://login.salesforce.com';
-
-  // Append security token to password if provided
-  const fullPassword = securityToken ? password + securityToken : password;
-
   try {
-    const tokenRes = await axios.post(
-      loginUrl + '/services/oauth2/token',
-      new URLSearchParams({
-        grant_type: 'password',
-        client_id: process.env.SF_CLIENT_ID,
-        client_secret: process.env.SF_CLIENT_SECRET,
-        username: username,
-        password: fullPassword
-      }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
+    const loginResult = await soapLogin(username, password, securityToken || '', orgType || 'production');
 
-    const { access_token, instance_url } = tokenRes.data;
-
-    // Get user info
-    const userRes = await axios.get(instance_url + '/services/oauth2/userinfo', {
-      headers: { Authorization: 'Bearer ' + access_token }
-    });
-
-    req.session.sfAccessToken = access_token;
-    req.session.sfInstanceUrl = instance_url;
-    req.session.sfUserInfo = userRes.data;
+    req.session.sfAccessToken = loginResult.access_token;
+    req.session.sfInstanceUrl = loginResult.instance_url;
+    req.session.sfUserInfo = {
+      name: loginResult.user_name,
+      email: loginResult.user_email,
+      preferred_username: username
+    };
 
     res.json({
       success: true,
       user: {
-        name: userRes.data.name,
-        email: userRes.data.email,
-        username: userRes.data.preferred_username
+        name: loginResult.user_name,
+        email: loginResult.user_email,
+        username: username
       }
     });
 
   } catch (err) {
-    console.error('Login error:', err.response?.data || err.message);
-    const sfError = err.response?.data;
-    let errorMsg = sfError?.error_description || sfError?.error || err.message;
+    console.error('Login error:', err.message);
+    let errorMsg = err.message;
 
-    // Helpful error messages
     if (errorMsg.includes('INVALID_LOGIN')) {
-      errorMsg = 'Invalid username or password. If you have IP restrictions, append your Security Token to the password.';
-    } else if (errorMsg.includes('invalid_client')) {
-      errorMsg = 'Connected App configuration error. Please contact your admin.';
+      errorMsg = 'Invalid username or password. If your IP is not trusted, append your Security Token to the password field.';
+    } else if (errorMsg.includes('LOGIN_MUST_USE_SECURITY_TOKEN')) {
+      errorMsg = 'Your IP address is not trusted. Please enter your Security Token in the field below.';
+    } else if (errorMsg.includes('INVALID_SESSION_ID')) {
+      errorMsg = 'Session expired. Please log in again.';
     }
 
     res.status(401).json({ error: errorMsg });

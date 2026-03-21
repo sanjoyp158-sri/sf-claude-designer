@@ -10,12 +10,6 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// SF_LOGIN_URL is the My Domain URL of your Salesforce org
-// For External Client Apps, OAuth must go through the org's My Domain URL
-// e.g. https://cognizant39.my.salesforce.com
-const SF_PROD_URL = process.env.SF_LOGIN_URL || 'https://cognizant39.my.salesforce.com';
-const SF_SANDBOX_URL = process.env.SF_SANDBOX_URL || 'https://test.salesforce.com';
-
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(session({
@@ -27,49 +21,34 @@ app.use(session({
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ——————————————————————————
-// ROUTE: Get OAuth URL for popup
+// ROUTE: Login with Username + Password + Security Token
+// This uses the Salesforce OAuth Username-Password flow (no browser redirect needed)
 // ——————————————————————————
-app.get('/auth/url', (req, res) => {
-  const orgType = req.query.org_type || 'production';
-  // For External Client Apps, MUST use the org's My Domain URL (not login.salesforce.com)
-  const loginUrl = orgType === 'sandbox' ? SF_SANDBOX_URL : SF_PROD_URL;
-  const params = new URLSearchParams({
-    response_type: 'code',
-    client_id: process.env.SF_CLIENT_ID,
-    redirect_uri: process.env.SF_CALLBACK_URL,
-    scope: 'api full refresh_token',
-    state: encodeURIComponent(loginUrl)
-  });
-  res.json({ url: loginUrl + '/services/oauth2/authorize?' + params.toString() });
-});
+app.post('/api/login', async (req, res) => {
+  const { username, password, securityToken, orgType } = req.body;
 
-// ——————————————————————————
-// ROUTE: OAuth Callback (called after Salesforce login in popup)
-// ——————————————————————————
-app.get('/oauth/callback', async (req, res) => {
-  const { code, state, error, error_description } = req.query;
-
-  if (error) {
-    return res.send(`<!DOCTYPE html><html><body><script>
-      window.opener && window.opener.postMessage({
-        type: 'SF_AUTH_ERROR',
-        error: '${(error_description || error).replace(/'/g, "\\'")}'
-      }, '*');
-      window.close();
-    </script></body></html>`);
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required' });
   }
 
-  const loginUrl = decodeURIComponent(state || SF_PROD_URL);
+  // For External Client Apps, use the org My Domain URL
+  // For sandbox, use test.salesforce.com
+  const loginUrl = orgType === 'sandbox'
+    ? 'https://test.salesforce.com'
+    : 'https://login.salesforce.com';
+
+  // Append security token to password if provided
+  const fullPassword = securityToken ? password + securityToken : password;
 
   try {
     const tokenRes = await axios.post(
       loginUrl + '/services/oauth2/token',
       new URLSearchParams({
-        grant_type: 'authorization_code',
+        grant_type: 'password',
         client_id: process.env.SF_CLIENT_ID,
         client_secret: process.env.SF_CLIENT_SECRET,
-        redirect_uri: process.env.SF_CALLBACK_URL,
-        code
+        username: username,
+        password: fullPassword
       }),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
@@ -85,24 +64,28 @@ app.get('/oauth/callback', async (req, res) => {
     req.session.sfInstanceUrl = instance_url;
     req.session.sfUserInfo = userRes.data;
 
-    res.send(`<!DOCTYPE html><html><body><script>
-      window.opener && window.opener.postMessage({
-        type: 'SF_AUTH_SUCCESS',
-        user: ${JSON.stringify({ name: userRes.data.name, email: userRes.data.email })}
-      }, '*');
-      window.close();
-    </script><p>Login successful! Closing...</p></body></html>`);
+    res.json({
+      success: true,
+      user: {
+        name: userRes.data.name,
+        email: userRes.data.email,
+        username: userRes.data.preferred_username
+      }
+    });
 
   } catch (err) {
-    console.error('OAuth error:', err.response?.data || err.message);
-    const msg = (err.response?.data?.error_description || err.message || 'OAuth failed').replace(/'/g, "\'");
-    res.send(`<!DOCTYPE html><html><body><script>
-      window.opener && window.opener.postMessage({
-        type: 'SF_AUTH_ERROR',
-        error: '${msg}'
-      }, '*');
-      window.close();
-    </script><p>Login failed. Closing...</p></body></html>`);
+    console.error('Login error:', err.response?.data || err.message);
+    const sfError = err.response?.data;
+    let errorMsg = sfError?.error_description || sfError?.error || err.message;
+
+    // Helpful error messages
+    if (errorMsg.includes('INVALID_LOGIN')) {
+      errorMsg = 'Invalid username or password. If you have IP restrictions, append your Security Token to the password.';
+    } else if (errorMsg.includes('invalid_client')) {
+      errorMsg = 'Connected App configuration error. Please contact your admin.';
+    }
+
+    res.status(401).json({ error: errorMsg });
   }
 });
 

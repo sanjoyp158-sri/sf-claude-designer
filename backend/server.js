@@ -5,7 +5,10 @@ const axios = require('axios');
 const session = require('express-session');
 const Anthropic = require('@anthropic-ai/sdk');
 const path = require('path');
-const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } = require('docx');
+const {
+  Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType,
+  Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType
+} = require('docx');
 const ExcelJS = require('exceljs');
 
 const app = express();
@@ -38,26 +41,20 @@ async function soapLogin(username, password, securityToken, orgType) {
   </soapenv:Body>
 </soapenv:Envelope>`;
 
-  const response = await axios.post(
-    loginUrl + '/services/Soap/u/57.0',
-    soapBody,
-    { headers: { 'Content-Type': 'text/xml', 'SOAPAction': 'login' } }
-  );
-
+  const response = await axios.post(loginUrl + '/services/Soap/u/57.0', soapBody, {
+    headers: { 'Content-Type': 'text/xml', 'SOAPAction': 'login' }
+  });
   const xml = response.data;
   if (xml.includes('<faultstring>')) {
-    const faultMatch = xml.match(/<faultstring>(.*?)<\/faultstring>/s);
-    throw new Error(faultMatch ? faultMatch[1].trim() : 'Login failed');
+    const m = xml.match(/<faultstring>(.*?)<\/faultstring>/s);
+    throw new Error(m ? m[1].trim() : 'Login failed');
   }
-
   const sessionMatch = xml.match(/<sessionId>(.*?)<\/sessionId>/);
   const serverUrlMatch = xml.match(/<serverUrl>(.*?)<\/serverUrl>/);
   const userFullNameMatch = xml.match(/<userFullName>(.*?)<\/userFullName>/);
   const userEmailMatch = xml.match(/<userEmail>(.*?)<\/userEmail>/);
-
   if (!sessionMatch || !serverUrlMatch) throw new Error('Could not parse login response');
   const instanceUrl = serverUrlMatch[1].match(/^(https:\/\/[^\/]+)/)[1];
-
   return {
     access_token: sessionMatch[1],
     instance_url: instanceUrl,
@@ -73,31 +70,24 @@ app.post('/api/login', async (req, res) => {
   const { username, password, securityToken, orgType } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password are required.' });
   try {
-    const loginResult = await soapLogin(username, password, securityToken || '', orgType || 'production');
-    req.session.sfAccessToken = loginResult.access_token;
-    req.session.sfInstanceUrl = loginResult.instance_url;
-    req.session.sfUserInfo = { name: loginResult.user_name, email: loginResult.user_email, preferred_username: username };
-    res.json({ success: true, user: { name: loginResult.user_name, email: loginResult.user_email, username } });
+    const r = await soapLogin(username, password, securityToken || '', orgType || 'production');
+    req.session.sfAccessToken = r.access_token;
+    req.session.sfInstanceUrl = r.instance_url;
+    req.session.sfUserInfo = { name: r.user_name, email: r.user_email, preferred_username: username };
+    res.json({ success: true, user: { name: r.user_name, email: r.user_email, username } });
   } catch (err) {
-    console.error('Login error:', err.message);
-    let errorMsg = err.message;
-    if (errorMsg.includes('INVALID_LOGIN')) errorMsg = 'Invalid username or password. If your IP is not trusted, append your Security Token.';
-    else if (errorMsg.includes('LOGIN_MUST_USE_SECURITY_TOKEN')) errorMsg = 'Your IP is not trusted. Please enter your Security Token.';
-    res.status(401).json({ error: errorMsg });
+    let msg = err.message;
+    if (msg.includes('INVALID_LOGIN')) msg = 'Invalid username or password. If your IP is not trusted, append your Security Token.';
+    else if (msg.includes('LOGIN_MUST_USE_SECURITY_TOKEN')) msg = 'Your IP is not trusted. Please enter your Security Token.';
+    res.status(401).json({ error: msg });
   }
 });
 
-// ——————————————————————————
-// ROUTE: Auth Status
-// ——————————————————————————
 app.get('/api/auth/status', (req, res) => {
   if (req.session.sfAccessToken) res.json({ connected: true, user: req.session.sfUserInfo });
   else res.json({ connected: false });
 });
 
-// ——————————————————————————
-// ROUTE: Logout
-// ——————————————————————————
 app.post('/api/auth/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 
 // ——————————————————————————
@@ -105,131 +95,249 @@ app.post('/api/auth/logout', (req, res) => { req.session.destroy(); res.json({ s
 // ——————————————————————————
 function detectExportIntent(message) {
   const msg = message.toLowerCase();
-  const wordKeywords = ['word document', 'word doc', 'docx', 'word file', 'ms word', 'microsoft word', 'generate word', 'create word', 'export word', 'download word', 'word format'];
-  const excelKeywords = ['excel', 'xlsx', 'spreadsheet', 'excel document', 'excel file', 'generate excel', 'create excel', 'export excel', 'download excel', 'excel format'];
-  const isWord = wordKeywords.some(k => msg.includes(k));
-  const isExcel = excelKeywords.some(k => msg.includes(k));
+  const wordKw = ['word document','word doc','docx','word file','ms word','microsoft word','generate word','create word','export word','download word','word format'];
+  const excelKw = ['excel','xlsx','spreadsheet','excel document','excel file','generate excel','create excel','export excel','download excel','excel format'];
+  const isWord = wordKw.some(k => msg.includes(k));
+  const isExcel = excelKw.some(k => msg.includes(k));
   return { isWord, isExcel, isAny: isWord || isExcel };
 }
 
 // ——————————————————————————
-// HELPER: Fetch metadata + call Claude
+// HELPER: Fetch Salesforce metadata including page layouts
 // ——————————————————————————
-async function getDesignSpec(message, accessToken, instanceUrl, exportType) {
+async function getSalesforceMetadata(message, accessToken, instanceUrl) {
   let metadataContext = '';
   try {
+    // 1. List all objects
     const descRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/', {
       headers: { Authorization: 'Bearer ' + accessToken }
     });
     const objects = descRes.data.sobjects.filter(o => o.queryable && o.createable).slice(0, 30).map(o => o.name).join(', ');
-    metadataContext = 'Available Salesforce Objects: ' + objects + '\n\n';
+    metadataContext += 'Available Salesforce Objects: ' + objects + '\n\n';
 
+    // 2. Get field metadata for mentioned objects
     const matches = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
-    if (matches) {
-      for (const objName of matches.slice(0, 2)) {
+    const objectsToDescribe = matches ? matches.slice(0, 3) : [];
+
+    // Always try Account if it's mentioned or implied
+    const msgLower = message.toLowerCase();
+    if (msgLower.includes('account') && !objectsToDescribe.includes('Account')) {
+      objectsToDescribe.unshift('Account');
+    }
+
+    for (const objName of objectsToDescribe.slice(0, 2)) {
+      try {
+        const objRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/', {
+          headers: { Authorization: 'Bearer ' + accessToken }
+        });
+        const fields = objRes.data.fields.map(f => ({
+          name: f.name, label: f.label, type: f.type,
+          required: !f.nillable && !f.defaultedOnCreate,
+          picklistValues: f.picklistValues ? f.picklistValues.map(p => p.value) : []
+        }));
+        metadataContext += 'Object: ' + objName + '\nLabel: ' + objRes.data.label + '\n';
+        metadataContext += 'Fields (first 50): ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
+
+        // 3. Get actual page layouts for this object
         try {
-          const objRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/', {
-            headers: { Authorization: 'Bearer ' + accessToken }
-          });
-          const fields = objRes.data.fields.map(f => ({ name: f.name, label: f.label, type: f.type, required: !f.nillable && !f.defaultedOnCreate }));
-          metadataContext += 'Object: ' + objName + '\nLabel: ' + objRes.data.label + '\n';
-          metadataContext += 'Fields (first 50): ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
-        } catch (e) {}
+          const layoutRes = await axios.get(
+            instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/layouts/',
+            { headers: { Authorization: 'Bearer ' + accessToken } }
+          );
+          const layoutData = layoutRes.data;
+          const layoutNames = [];
+
+          // Collect layout names from the response
+          if (layoutData.layouts) {
+            for (const layout of layoutData.layouts) {
+              if (layout.name) layoutNames.push(layout.name);
+            }
+          }
+          // Also check recordTypeMappings for layout names
+          if (layoutData.recordTypeMappings) {
+            for (const rtm of layoutData.recordTypeMappings) {
+              if (rtm.layoutId && rtm.name) {
+                // Try to find layout name by ID
+              }
+            }
+          }
+
+          if (layoutNames.length > 0) {
+            metadataContext += 'Page Layouts for ' + objName + ':\n';
+            layoutNames.forEach(n => { metadataContext += '  - ' + n + '\n'; });
+            metadataContext += '\n';
+          }
+        } catch (le) {
+          // Try alternate endpoint
+          try {
+            const layoutRes2 = await axios.get(
+              instanceUrl + '/services/data/v57.0/query/?q=' +
+              encodeURIComponent("SELECT Id, Name FROM Layout WHERE TableEnumOrId = '" + objName + "'"),
+              { headers: { Authorization: 'Bearer ' + accessToken } }
+            );
+            if (layoutRes2.data.records && layoutRes2.data.records.length > 0) {
+              metadataContext += 'Page Layouts for ' + objName + ':\n';
+              layoutRes2.data.records.forEach(r => { metadataContext += '  - ' + r.Name + '\n'; });
+              metadataContext += '\n';
+            }
+          } catch (le2) {
+            console.log('Page layout fetch failed:', le2.message);
+          }
+        }
+      } catch (e) {
+        console.log('Object describe failed for', objName, e.message);
       }
     }
+
+    // 4. Get profiles
+    try {
+      const profileRes = await axios.get(
+        instanceUrl + '/services/data/v57.0/query/?q=' + encodeURIComponent("SELECT Id, Name FROM Profile ORDER BY Name LIMIT 20"),
+        { headers: { Authorization: 'Bearer ' + accessToken } }
+      );
+      if (profileRes.data.records) {
+        const profileNames = profileRes.data.records.map(p => p.Name).join(', ');
+        metadataContext += 'Available Profiles: ' + profileNames + '\n\n';
+      }
+    } catch (pe) {
+      console.log('Profile fetch failed:', pe.message);
+    }
+
   } catch (e) {
     console.error('Metadata error:', e.message);
   }
+  return metadataContext;
+}
+
+// ——————————————————————————
+// HELPER: Call Claude with metadata
+// ——————————————————————————
+async function getDesignSpec(message, accessToken, instanceUrl, exportType) {
+  const metadataContext = await getSalesforceMetadata(message, accessToken, instanceUrl);
+
+  const baseInstruction = `CRITICAL FORMATTING RULES - YOU MUST FOLLOW THESE EXACTLY:
+1. NEVER use markdown tables (no pipe characters | for tables, no ------ separators)
+2. NEVER use --- as a horizontal rule
+3. For ANY tabular data (field specs, attribute/value pairs), use this EXACT format:
+   FIELD: <field label>
+   - API Name: <value>
+   - Type: <value>
+   - Values: <value>
+   - Required: Yes/No
+   - Help Text: <value>
+   (blank line between each field)
+4. Use ## for main headings, ### for sub-headings
+5. Use plain bullet points (- ) for lists
+6. Write in clean prose paragraphs for descriptions
+
+Always generate the COMPLETE specification immediately. Never ask for more details.
+If something is not specified, make a reasonable Salesforce best-practice assumption and note it.
+Use the EXACT page layout names and profile names from the metadata provided - never say "default layout".
+`;
 
   let exportInstruction = '';
   if (exportType === 'word') {
     exportInstruction = `
-The user wants a WORD DOCUMENT design specification. Structure your response with these exact sections using ## for main headings and ### for sub-headings:
+Structure your response with these exact sections:
 
 ## Design Specification Document
 
 ### 1. Requirement Summary
-(Summarize the business requirement in 2-3 sentences)
+(2-3 sentence summary)
 
 ### 2. Object Details
-(Which Salesforce object is involved, its purpose)
+FIELD: Object Overview
+- Object Name: <value>
+- API Name: <value>
+- Object Type: Standard/Custom
+- Purpose: <value>
+- Customization Type: New Custom Field Addition
 
 ### 3. Field Specifications
-For each field/component, provide:
-- **Field Name**: (API name)
-- **Label**: (User-facing label)
-- **Field Type**: (e.g., Picklist, Text, Checkbox)
-- **Values/Length**: (picklist values or max length)
-- **Required**: Yes/No
-- **Default Value**: (if any)
+For EACH field, use this block format (NO TABLES):
 
-### 4. Profile & Permission Settings
-(Which profiles can see/edit each field, field-level security details)
+FIELD: Custom Flag
+- API Name: Custom_Flag__c
+- Field Type: Picklist
+- Picklist Values: Yes, No
+- Required: No
+- Default Value: None
+- Help Text: <suggested help text>
+- Description: <purpose>
 
-### 5. Page Layout Recommendations
-(Which page layouts to add this field to, section placement)
+### 4. Profile and Permission Settings
+For each profile from the metadata, specify:
+
+PROFILE: <Exact Profile Name from metadata>
+- Field Access: Read/Write or Read Only or Hidden
+- Visibility: Visible/Hidden
+
+### 5. Page Layout Settings
+Use the EXACT page layout names from the metadata. For each layout:
+
+LAYOUT: <Exact Layout Name from metadata>
+- Action: Add field
+- Section: <recommended section>
+- Position: <left column / right column>
+- Required on Layout: Yes/No
 
 ### 6. Validation Rules
-(Any validation rules needed)
+(List any needed validation rules or state "None required")
 
 ### 7. Implementation Steps
-(Step-by-step Salesforce setup instructions)
+1. Step one
+2. Step two
+3. Step three
 
 ### 8. Testing Checklist
-- (Test scenario 1)
-- (Test scenario 2)
-
-Be detailed and specific. Do NOT ask for more information - generate the complete spec based on what was provided.`;
+- Test case one
+- Test case two
+`;
   } else if (exportType === 'excel') {
     exportInstruction = `
-The user wants an EXCEL SPREADSHEET design specification. Structure your response with these exact sections using ## for main headings and ### for sub-headings:
+Structure with these sections. NO TABLES, NO PIPE CHARACTERS:
 
 ## Design Specification
 
 ### Requirement Summary
-(Summarize the business requirement)
+(Brief summary)
 
 ### Field Specifications
-Provide each field as a separate bullet in this exact format:
-- **Field Name**: Account_Flag__c | **Label**: Account Flag | **Type**: Picklist | **Values**: Yes; No | **Required**: No | **Profile**: Sales Rep
+For each field:
+FIELD: <label>
+- API Name: <value>
+- Type: <value>
+- Values: <value>
+- Required: Yes/No
+- Profile Access: <profile name> - Read/Write
 
-### Profile & Security
-(Profile access details)
+### Page Layout Settings
+LAYOUT: <Exact layout name from metadata>
+- Section: <name>
+- Position: Left/Right
 
 ### Implementation Steps
-1. (Step 1)
-2. (Step 2)
-3. (Step 3)
-
-### Testing
-- (Test case 1)
-- (Test case 2)
-
-Be detailed. Do NOT ask for more information - generate the complete spec based on what was provided.`;
+1. Step one
+2. Step two
+`;
   } else {
     exportInstruction = `
-Generate a comprehensive design specification. Use ## for main sections and ### for subsections. Include:
-- Requirement summary
-- Field/component specifications with types, values, and constraints
-- Profile and permission settings
-- Page layout recommendations
-- Implementation steps
-- Testing checklist
-
-Do NOT ask for more information - generate the full spec based on what was provided.`;
+Structure your response with clear sections. NO TABLES, NO PIPE CHARACTERS.
+Include: Requirement summary, Field specifications (using FIELD: blocks), Profile settings, Page layout settings (using exact layout names), Implementation steps, Testing checklist.
+`;
   }
 
   const claudeRes = await anthropic.messages.create({
     model: 'claude-opus-4-5',
     max_tokens: 4000,
-    system: `You are a Salesforce design specification expert. Based on the user's requirement and the available Salesforce metadata, generate a complete detailed design specification document.
+    system: `You are a Salesforce design specification expert.
 
-IMPORTANT: Always generate the COMPLETE specification immediately based on the information provided. Never ask for more details or say "once you provide more information". If some details are not specified, make reasonable assumptions based on Salesforce best practices and clearly note them.
+${baseInstruction}
 
-Salesforce Metadata Context:
-${metadataContext}
+${exportInstruction}
 
-${exportInstruction}`,
+Salesforce Metadata from the connected org:
+${metadataContext}`,
     messages: [{ role: 'user', content: message }]
   });
 
@@ -247,7 +355,6 @@ app.post('/api/chat', async (req, res) => {
     let exportType = null;
     if (intent.isWord) exportType = 'word';
     else if (intent.isExcel) exportType = 'excel';
-
     const response = await getDesignSpec(message, req.session.sfAccessToken, req.session.sfInstanceUrl, exportType);
     res.json({ response, exportIntent: intent });
   } catch (err) {
@@ -255,6 +362,230 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ——————————————————————————
+// HELPER: Build Word paragraph from text (handles bold inline)
+// ——————————————————————————
+function makeTextRuns(text) {
+  const parts = text.split(/\*\*(.*?)\*\*/g);
+  return parts.map((part, i) => new TextRun({ text: part, bold: i % 2 === 1, size: 22, font: 'Calibri' }));
+}
+
+// ——————————————————————————
+// HELPER: Build a styled 2-column Word table from key:value pairs
+// ——————————————————————————
+function buildKeyValueTable(rows) {
+  const borderStyle = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
+  const tableRows = rows.map((row, idx) => {
+    const isHeader = idx === 0 && row.isHeader;
+    const bgColor = isHeader ? '1F4E79' : (idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF');
+    const textColor = isHeader ? 'FFFFFF' : '000000';
+    return new TableRow({
+      children: [
+        new TableCell({
+          width: { size: 35, type: WidthType.PERCENTAGE },
+          shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
+          borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
+          children: [new Paragraph({
+            children: [new TextRun({ text: row.key, bold: true, color: textColor, size: 20, font: 'Calibri' })],
+            spacing: { before: 60, after: 60 }
+          })]
+        }),
+        new TableCell({
+          width: { size: 65, type: WidthType.PERCENTAGE },
+          shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
+          borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
+          children: [new Paragraph({
+            children: [new TextRun({ text: row.value, color: textColor, size: 20, font: 'Calibri' })],
+            spacing: { before: 60, after: 60 }
+          })]
+        })
+      ]
+    });
+  });
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: tableRows
+  });
+}
+
+// ——————————————————————————
+// HELPER: Parse Claude's text output into Word doc elements
+// ——————————————————————————
+function parseToWordElements(specText, requirementText) {
+  const lines = specText.split('\n');
+  const elements = [];
+  let i = 0;
+
+  // Title
+  elements.push(new Paragraph({
+    children: [new TextRun({ text: 'Salesforce Design Specification', bold: true, size: 48, color: '1F4E79', font: 'Calibri' })],
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 200 }
+  }));
+
+  // Date line
+  elements.push(new Paragraph({
+    children: [new TextRun({ text: 'Generated: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), size: 20, color: '666666', font: 'Calibri' })],
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 100 }
+  }));
+
+  // Requirement line
+  if (requirementText) {
+    elements.push(new Paragraph({
+      children: [
+        new TextRun({ text: 'Requirement: ', bold: true, size: 20, color: '1F4E79', font: 'Calibri' }),
+        new TextRun({ text: requirementText, size: 20, font: 'Calibri' })
+      ],
+      spacing: { after: 400 },
+      border: { bottom: { style: BorderStyle.SINGLE, size: 2, color: '1F4E79' } }
+    }));
+  }
+
+  // Collect FIELD: blocks and their attributes
+  let fieldBlock = null;
+  let fieldRows = [];
+
+  const flushFieldBlock = () => {
+    if (fieldBlock && fieldRows.length > 0) {
+      // Header row for the field table
+      elements.push(new Paragraph({
+        children: [new TextRun({ text: fieldBlock, bold: true, size: 22, color: 'FFFFFF', font: 'Calibri' })],
+        shading: { type: ShadingType.CLEAR, fill: '2E75B6', color: '2E75B6' },
+        spacing: { before: 120, after: 0 }
+      }));
+      elements.push(buildKeyValueTable(fieldRows));
+      elements.push(new Paragraph({ text: '', spacing: { after: 200 } }));
+      fieldBlock = null;
+      fieldRows = [];
+    }
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Skip markdown table lines entirely
+    if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed)) {
+      i++;
+      continue;
+    }
+
+    // Skip horizontal rules
+    if (/^---+$/.test(trimmed) || /^===+$/.test(trimmed)) {
+      i++;
+      continue;
+    }
+
+    // Detect FIELD: block header
+    if (/^FIELD:\s*(.+)/.test(trimmed)) {
+      flushFieldBlock();
+      fieldBlock = trimmed.replace(/^FIELD:\s*/, '');
+      i++;
+      continue;
+    }
+
+    // Detect PROFILE: or LAYOUT: block headers (same treatment as FIELD:)
+    if (/^(PROFILE|LAYOUT):\s*(.+)/.test(trimmed)) {
+      flushFieldBlock();
+      const m = trimmed.match(/^(PROFILE|LAYOUT):\s*(.+)/);
+      fieldBlock = m[1] + ': ' + m[2];
+      i++;
+      continue;
+    }
+
+    // If we're inside a field/profile/layout block, collect - key: value lines
+    if (fieldBlock && /^-\s+[\w\s]+:\s*.+/.test(trimmed)) {
+      const colonIdx = trimmed.indexOf(':');
+      const key = trimmed.substring(1, colonIdx).trim();
+      const value = trimmed.substring(colonIdx + 1).trim();
+      fieldRows.push({ key, value });
+      i++;
+      continue;
+    }
+
+    // If we encounter a non-list line while in a field block, flush it
+    if (fieldBlock && trimmed !== '' && !/^-/.test(trimmed)) {
+      flushFieldBlock();
+    }
+
+    // H1 heading
+    if (/^##\s/.test(trimmed)) {
+      const text = trimmed.replace(/^##\s*/, '');
+      elements.push(new Paragraph({
+        children: [new TextRun({ text, bold: true, size: 28, color: '1F4E79', font: 'Calibri' })],
+        border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: '1F4E79' } },
+        spacing: { before: 480, after: 160 }
+      }));
+      i++;
+      continue;
+    }
+
+    // H2 heading
+    if (/^###\s/.test(trimmed)) {
+      const text = trimmed.replace(/^###\s*/, '');
+      elements.push(new Paragraph({
+        children: [new TextRun({ text, bold: true, size: 24, color: '2E75B6', font: 'Calibri' })],
+        spacing: { before: 320, after: 120 }
+      }));
+      i++;
+      continue;
+    }
+
+    // H3 heading
+    if (/^####\s/.test(trimmed)) {
+      const text = trimmed.replace(/^####\s*/, '');
+      elements.push(new Paragraph({
+        children: [new TextRun({ text, bold: true, size: 22, color: '2E75B6', font: 'Calibri' })],
+        spacing: { before: 200, after: 80 }
+      }));
+      i++;
+      continue;
+    }
+
+    // Numbered list
+    if (/^\d+\.\s/.test(trimmed)) {
+      const text = trimmed.replace(/^\d+\.\s*/, '');
+      elements.push(new Paragraph({
+        children: makeTextRuns(text),
+        numbering: { reference: 'default-numbering', level: 0 },
+        spacing: { after: 80 }
+      }));
+      i++;
+      continue;
+    }
+
+    // Bullet list
+    if (/^[-*•]\s/.test(trimmed)) {
+      const text = trimmed.replace(/^[-*•]\s*/, '');
+      elements.push(new Paragraph({
+        children: makeTextRuns(text),
+        bullet: { level: 0 },
+        spacing: { after: 80 }
+      }));
+      i++;
+      continue;
+    }
+
+    // Empty line
+    if (!trimmed) {
+      elements.push(new Paragraph({ text: '', spacing: { after: 80 } }));
+      i++;
+      continue;
+    }
+
+    // Normal paragraph
+    elements.push(new Paragraph({
+      children: makeTextRuns(trimmed),
+      spacing: { after: 120 }
+    }));
+    i++;
+  }
+
+  flushFieldBlock();
+  return elements;
+}
 
 // ——————————————————————————
 // ROUTE: Export to Word (.docx)
@@ -268,67 +599,23 @@ app.post('/api/export/word', async (req, res) => {
       specText = await getDesignSpec(message, req.session.sfAccessToken, req.session.sfInstanceUrl, 'word');
     }
 
-    const lines = specText.split('\n');
-    const docChildren = [];
-
-    docChildren.push(new Paragraph({
-      text: 'Salesforce Design Specification',
-      heading: HeadingLevel.TITLE,
-      alignment: AlignmentType.CENTER,
-      spacing: { after: 400 }
-    }));
-
-    docChildren.push(new Paragraph({
-      children: [new TextRun({
-        text: 'Generated on: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
-        color: '666666', size: 22
-      })],
-      alignment: AlignmentType.CENTER,
-      spacing: { after: 600 }
-    }));
-
-    if (message) {
-      docChildren.push(new Paragraph({
-        children: [new TextRun({ text: 'Requirement: ', bold: true, size: 24 }), new TextRun({ text: message, size: 24 })],
-        spacing: { after: 400 }
-      }));
-    }
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) { docChildren.push(new Paragraph({ text: '', spacing: { after: 100 } })); continue; }
-
-      if (trimmed.startsWith('## ') || trimmed.startsWith('# ')) {
-        const text = trimmed.replace(/^#+\s*/, '');
-        docChildren.push(new Paragraph({ text, heading: HeadingLevel.HEADING_1, spacing: { before: 400, after: 200 } }));
-      } else if (trimmed.startsWith('### ') || trimmed.startsWith('#### ')) {
-        const text = trimmed.replace(/^#+\s*/, '');
-        docChildren.push(new Paragraph({ text, heading: HeadingLevel.HEADING_2, spacing: { before: 300, after: 120 } }));
-      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('• ')) {
-        const text = trimmed.replace(/^[-*•]\s*/, '');
-        const parts = text.split(/\*\*(.*?)\*\*/g);
-        const runs = parts.map((part, i) => new TextRun({ text: part, bold: i % 2 === 1 }));
-        docChildren.push(new Paragraph({ children: runs, bullet: { level: 0 }, spacing: { after: 80 } }));
-      } else if (/^\d+\.\s/.test(trimmed)) {
-        const text = trimmed.replace(/^\d+\.\s*/, '');
-        const parts = text.split(/\*\*(.*?)\*\*/g);
-        const runs = parts.map((part, i) => new TextRun({ text: part, bold: i % 2 === 1 }));
-        docChildren.push(new Paragraph({ children: runs, numbering: { reference: 'default-numbering', level: 0 }, spacing: { after: 80 } }));
-      } else {
-        const parts = trimmed.split(/\*\*(.*?)\*\*/g);
-        const runs = parts.map((part, i) => new TextRun({ text: part, bold: i % 2 === 1 }));
-        docChildren.push(new Paragraph({ children: runs, spacing: { after: 120 } }));
-      }
-    }
+    const docChildren = parseToWordElements(specText, message);
 
     const doc = new Document({
       numbering: {
         config: [{
           reference: 'default-numbering',
-          levels: [{ level: 0, format: 'decimal', text: '%1.', alignment: AlignmentType.START }]
+          levels: [{ level: 0, format: 'decimal', text: '%1.', alignment: AlignmentType.START, style: { paragraph: { indent: { left: 720, hanging: 260 } } } }]
         }]
       },
-      sections: [{ properties: {}, children: docChildren }]
+      styles: {
+        default: {
+          document: {
+            run: { font: 'Calibri', size: 22 }
+          }
+        }
+      },
+      sections: [{ properties: { page: { margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } }, children: docChildren }]
     });
 
     const buffer = await Packer.toBuffer(doc);
@@ -337,7 +624,7 @@ app.post('/api/export/word', async (req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
     res.send(buffer);
   } catch (err) {
-    console.error('Word export error:', err.message);
+    console.error('Word export error:', err.message, err.stack);
     res.status(500).json({ error: err.message });
   }
 });
@@ -366,7 +653,7 @@ app.post('/api/export/excel', async (req, res) => {
     const titleCell = sheet1.getCell('A1');
     titleCell.value = 'Salesforce Design Specification';
     titleCell.font = { name: 'Calibri', size: 18, bold: true, color: { argb: 'FFFFFFFF' } };
-    titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF032D60' } };
+    titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
     titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
     sheet1.getRow(1).height = 40;
 
@@ -392,24 +679,31 @@ app.post('/api/export/excel', async (req, res) => {
     const lines = specText.split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
+      // Skip markdown table lines and horizontal rules
+      if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed) || /^---+$/.test(trimmed)) continue;
       if (!trimmed) { rowIdx++; continue; }
 
       sheet1.mergeCells('A' + rowIdx + ':B' + rowIdx);
       const cell = sheet1.getCell('A' + rowIdx);
       cell.alignment = { wrapText: true, vertical: 'top' };
 
-      if (trimmed.startsWith('## ') || trimmed.startsWith('# ')) {
-        cell.value = trimmed.replace(/^#+\s*/, '');
-        cell.font = { name: 'Calibri', size: 14, bold: true, color: { argb: 'FF032D60' } };
+      if (/^## /.test(trimmed)) {
+        cell.value = trimmed.replace(/^##\s*/, '');
+        cell.font = { name: 'Calibri', size: 14, bold: true, color: { argb: 'FF1F4E79' } };
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD0E4F7' } };
         sheet1.getRow(rowIdx).height = 28;
-      } else if (trimmed.startsWith('### ') || trimmed.startsWith('#### ')) {
-        cell.value = trimmed.replace(/^#+\s*/, '');
-        cell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FF0176D3' } };
+      } else if (/^###/.test(trimmed)) {
+        cell.value = trimmed.replace(/^###\s*/, '');
+        cell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FF2E75B6' } };
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F8FF' } };
         sheet1.getRow(rowIdx).height = 22;
-      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('• ')) {
-        cell.value = '  • ' + trimmed.replace(/^[-*•]\s*/, '').replace(/\*\*/g, '');
+      } else if (/^FIELD:|^PROFILE:|^LAYOUT:/.test(trimmed)) {
+        cell.value = trimmed.replace(/^(FIELD|PROFILE|LAYOUT):\s*/, '');
+        cell.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E75B6' } };
+        sheet1.getRow(rowIdx).height = 22;
+      } else if (/^[-*]\s/.test(trimmed)) {
+        cell.value = '  • ' + trimmed.replace(/^[-*]\s*/, '').replace(/\*\*/g, '');
         cell.font = { name: 'Calibri', size: 11 };
         sheet1.getRow(rowIdx).height = 18;
       } else {
@@ -417,12 +711,11 @@ app.post('/api/export/excel', async (req, res) => {
         cell.font = { name: 'Calibri', size: 11 };
         sheet1.getRow(rowIdx).height = 18;
       }
-
       cell.border = { bottom: { style: 'thin', color: { argb: 'FFE0E5EE' } } };
       rowIdx++;
     }
 
-    // Sheet 2: Fields Summary — parse field lines from spec
+    // Sheet 2: Fields Summary
     const sheet2 = workbook.addWorksheet('Fields Summary');
     sheet2.columns = [
       { header: 'Field API Name', key: 'apiName', width: 30 },
@@ -434,53 +727,68 @@ app.post('/api/export/excel', async (req, res) => {
       { header: 'Notes', key: 'notes', width: 40 }
     ];
 
-    const headerRow2 = sheet2.getRow(1);
-    headerRow2.eachCell(cell => {
+    const hdr = sheet2.getRow(1);
+    hdr.eachCell(cell => {
       cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Calibri' };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0176D3' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
       cell.alignment = { horizontal: 'center', vertical: 'middle' };
       cell.border = { bottom: { style: 'medium', color: { argb: 'FF032D60' } } };
     });
-    headerRow2.height = 25;
+    hdr.height = 25;
 
-    // Parse field lines — match the structured format we instruct Claude to use
-    let fieldRowIdx = 2;
+    // Parse FIELD: blocks from specText
+    let currentField = null;
+    let fieldData = {};
+    let fieldRows2 = [];
+
+    const flushField = () => {
+      if (currentField) {
+        fieldRows2.push({
+          apiName: fieldData['api name'] || fieldData['api'] || currentField,
+          label: currentField,
+          type: fieldData['field type'] || fieldData['type'] || '',
+          values: fieldData['picklist values'] || fieldData['values'] || fieldData['values / length'] || '',
+          required: fieldData['required'] || 'No',
+          profile: fieldData['profile access'] || '',
+          notes: fieldData['description'] || fieldData['help text'] || ''
+        });
+      }
+    };
+
     for (const line of lines) {
-      const trimmed = line.trim();
-      // Match lines like: - **Field Name**: Foo | **Label**: Bar | **Type**: Picklist | **Values**: Yes; No | **Required**: No | **Profile**: Sales Rep
-      if (trimmed.startsWith('-') || trimmed.startsWith('*')) {
-        const apiNameMatch = trimmed.match(/\*\*Field Name\*\*:\s*([^|]+)/i);
-        const labelMatch = trimmed.match(/\*\*Label\*\*:\s*([^|]+)/i);
-        const typeMatch = trimmed.match(/\*\*(?:Field )?Type\*\*:\s*([^|]+)/i);
-        const valuesMatch = trimmed.match(/\*\*Values?(?:\/Length)?\*\*:\s*([^|]+)/i);
-        const requiredMatch = trimmed.match(/\*\*Required\*\*:\s*([^|]+)/i);
-        const profileMatch = trimmed.match(/\*\*Profile(?:\s*Access)?\*\*:\s*([^|]+)/i);
-        const notesMatch = trimmed.match(/\*\*Notes?\*\*:\s*([^|]+)/i);
-
-        if (apiNameMatch || typeMatch) {
-          const row = sheet2.addRow({
-            apiName: apiNameMatch ? apiNameMatch[1].trim() : '',
-            label: labelMatch ? labelMatch[1].trim() : (apiNameMatch ? apiNameMatch[1].trim() : ''),
-            type: typeMatch ? typeMatch[1].trim() : '',
-            values: valuesMatch ? valuesMatch[1].trim() : '',
-            required: requiredMatch ? requiredMatch[1].trim() : 'No',
-            profile: profileMatch ? profileMatch[1].trim() : '',
-            notes: notesMatch ? notesMatch[1].trim() : ''
-          });
-          row.eachCell(cell => {
-            cell.font = { name: 'Calibri', size: 11 };
-            cell.border = { bottom: { style: 'thin', color: { argb: 'FFE0E5EE' } } };
-            if (fieldRowIdx % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF9FAFB' } };
-          });
-          fieldRowIdx++;
-        }
+      const t = line.trim();
+      if (/^FIELD:\s*(.+)/.test(t)) {
+        flushField();
+        currentField = t.replace(/^FIELD:\s*/, '');
+        fieldData = {};
+      } else if (currentField && /^-\s+[\w\s]+:\s*.+/.test(t)) {
+        const ci = t.indexOf(':');
+        const key = t.substring(1, ci).trim().toLowerCase();
+        const val = t.substring(ci + 1).trim();
+        fieldData[key] = val;
+      } else if (currentField && t && !/^-/.test(t)) {
+        flushField();
+        currentField = null;
+        fieldData = {};
       }
     }
+    flushField();
 
-    if (fieldRowIdx === 2) {
-      sheet2.addRow({ apiName: 'See Design Specification tab', label: '', type: '', values: '', required: '', profile: '', notes: 'Field details are in the main specification sheet' });
+    let fRowIdx = 2;
+    for (const fr of fieldRows2) {
+      const row = sheet2.addRow(fr);
+      row.eachCell(cell => {
+        cell.font = { name: 'Calibri', size: 11 };
+        cell.border = { bottom: { style: 'thin', color: { argb: 'FFE0E5EE' } } };
+        cell.alignment = { wrapText: true };
+        if (fRowIdx % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F8FF' } };
+      });
+      fRowIdx++;
     }
 
+    if (fRowIdx === 2) {
+      sheet2.addRow({ apiName: 'See Design Specification tab', label: '', type: '', values: '', required: '', profile: '', notes: '' });
+    }
     sheet2.autoFilter = { from: 'A1', to: 'G1' };
 
     const filename = 'SF_Design_Spec_' + new Date().toISOString().slice(0, 10) + '.xlsx';

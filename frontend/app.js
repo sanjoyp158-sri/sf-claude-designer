@@ -18,10 +18,32 @@ document.addEventListener('DOMContentLoaded', () => {
   const sfPassword = document.getElementById('sfPassword');
   const exportWordBtn = document.getElementById('exportWordBtn');
   const exportExcelBtn = document.getElementById('exportExcelBtn');
+  const exportRow = document.getElementById('exportRow');
 
   // Track last message and response for export
   let lastMessage = '';
   let lastResponse = '';
+
+  // ——————————————
+  // AUTO-EXPAND TEXTAREA
+  // Grows as user types, up to max-height (set in CSS as 300px)
+  // Also allows manual drag-resize via CSS resize:vertical
+  // ——————————————
+  function autoExpandTextarea() {
+    // Reset height so scrollHeight is accurate
+    userInput.style.height = 'auto';
+    // Set height to match content (capped by CSS max-height)
+    const newHeight = Math.min(userInput.scrollHeight, 300);
+    userInput.style.height = newHeight + 'px';
+  }
+
+  if (userInput) {
+    userInput.addEventListener('input', autoExpandTextarea);
+    // Also handle paste events
+    userInput.addEventListener('paste', () => {
+      setTimeout(autoExpandTextarea, 0);
+    });
+  }
 
   // ——————————————
   // Toggle password visibility
@@ -29,7 +51,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (togglePw && sfPassword) {
     togglePw.addEventListener('click', () => {
       sfPassword.type = sfPassword.type === 'password' ? 'text' : 'password';
-      togglePw.textContent = sfPassword.type === 'password' ? '👁' : '🔒';
+      togglePw.textContent = sfPassword.type === 'password' ? '\uD83D\uDC41' : '\uD83D\uDD12';
     });
   }
 
@@ -95,6 +117,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!message) return;
     addMessage(message, 'user');
     userInput.value = '';
+    // Reset textarea height after clearing
+    userInput.style.height = 'auto';
     sendBtn.disabled = true;
     hideExportButtons();
     const typingId = addTyping();
@@ -115,12 +139,12 @@ document.addEventListener('DOMContentLoaded', () => {
         addMessage(data.response, 'bot');
         showExportButtons();
 
-        // Auto-trigger export if user explicitly asked for a Word or Excel document
+        // Auto-trigger export if user asked for Word or Excel
         if (data.exportIntent && data.exportIntent.isWord) {
-          addSystemMessage('📄 Generating your Word document...');
+          addSystemMessage('\uD83D\uDCC4 Generating your Word document...');
           await triggerExport('word');
         } else if (data.exportIntent && data.exportIntent.isExcel) {
-          addSystemMessage('📊 Generating your Excel file...');
+          addSystemMessage('\uD83D\uDCCA Generating your Excel file...');
           await triggerExport('excel');
         }
       } else if (res.status === 401) {
@@ -145,7 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const ext = type === 'word' ? 'docx' : 'xlsx';
     const btn = type === 'word' ? exportWordBtn : exportExcelBtn;
 
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating...'; }
+    if (btn) { btn.disabled = true; btn.textContent = '\u23F3 Generating...'; }
 
     try {
       const res = await fetch(endpoint, {
@@ -165,24 +189,22 @@ document.addEventListener('DOMContentLoaded', () => {
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
-        addSystemMessage('✅ ' + (type === 'word' ? 'Word document' : 'Excel file') + ' downloaded successfully!');
+        addSystemMessage('\u2705 ' + (type === 'word' ? 'Word document' : 'Excel file') + ' downloaded successfully!');
       } else {
         const err = await res.json();
-        addSystemMessage('❌ Export failed: ' + err.error);
+        addSystemMessage('\u274C Export failed: ' + err.error);
       }
     } catch (e) {
-      addSystemMessage('❌ Export error: ' + e.message);
+      addSystemMessage('\u274C Export error: ' + e.message);
     } finally {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = type === 'word' ? '📄 Export Word' : '📊 Export Excel';
+        btn.textContent = type === 'word' ? '\uD83D\uDCC4 Export Word' : '\uD83D\uDCCA Export Excel';
       }
     }
   }
 
-  // ——————————————
-  // EXPORT BUTTONS (manual)
-  // ——————————————
+  // Export buttons (manual click)
   if (exportWordBtn) {
     exportWordBtn.addEventListener('click', async () => {
       if (!lastResponse) return;
@@ -227,11 +249,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function showExportButtons() {
     if (exportWordBtn) exportWordBtn.classList.remove('hidden');
     if (exportExcelBtn) exportExcelBtn.classList.remove('hidden');
+    if (exportRow) exportRow.classList.remove('hidden');
   }
 
   function hideExportButtons() {
     if (exportWordBtn) exportWordBtn.classList.add('hidden');
     if (exportExcelBtn) exportExcelBtn.classList.add('hidden');
+    if (exportRow) exportRow.classList.add('hidden');
   }
 
   function addMessage(text, type) {

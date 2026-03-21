@@ -419,7 +419,7 @@ function parseToWordElements(specText, requirementText) {
 
   // Title
   elements.push(new Paragraph({
-    children: [new TextRun({ text: 'Salesforce Design Specification', bold: true, size: 48, color: '1F4E79', font: 'Calibri' })],
+    children: [new TextRun({ text: 'Salesforce Life Science Cloud Design Specification', bold: true, size: 48, color: '1F4E79', font: 'Calibri' })],
     alignment: AlignmentType.CENTER,
     spacing: { after: 200 }
   }));
@@ -651,7 +651,7 @@ app.post('/api/export/excel', async (req, res) => {
 
     sheet1.mergeCells('A1:B1');
     const titleCell = sheet1.getCell('A1');
-    titleCell.value = 'Salesforce Design Specification';
+    titleCell.value = 'Salesforce Life Science Cloud Design Specification';
     titleCell.font = { name: 'Calibri', size: 18, bold: true, color: { argb: 'FFFFFFFF' } };
     titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
     titleCell.alignment = { horizontal: 'center', vertical: 'middle' };

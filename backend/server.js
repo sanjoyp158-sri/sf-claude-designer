@@ -103,23 +103,19 @@ function detectExportIntent(message) {
 }
 
 // ——————————————————————————
-// HELPER: Fetch Salesforce metadata including page layouts
+// HELPER: Fetch Salesforce metadata
 // ——————————————————————————
 async function getSalesforceMetadata(message, accessToken, instanceUrl) {
   let metadataContext = '';
   try {
-    // 1. List all objects
     const descRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/', {
       headers: { Authorization: 'Bearer ' + accessToken }
     });
     const objects = descRes.data.sobjects.filter(o => o.queryable && o.createable).slice(0, 30).map(o => o.name).join(', ');
     metadataContext += 'Available Salesforce Objects: ' + objects + '\n\n';
 
-    // 2. Get field metadata for mentioned objects
     const matches = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
     const objectsToDescribe = matches ? matches.slice(0, 3) : [];
-
-    // Always try Account if it's mentioned or implied
     const msgLower = message.toLowerCase();
     if (msgLower.includes('account') && !objectsToDescribe.includes('Account')) {
       objectsToDescribe.unshift('Account');
@@ -138,7 +134,6 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
         metadataContext += 'Object: ' + objName + '\nLabel: ' + objRes.data.label + '\n';
         metadataContext += 'Fields (first 50): ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
 
-        // 3. Get actual page layouts for this object
         try {
           const layoutRes = await axios.get(
             instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/layouts/',
@@ -146,29 +141,17 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
           );
           const layoutData = layoutRes.data;
           const layoutNames = [];
-
-          // Collect layout names from the response
           if (layoutData.layouts) {
             for (const layout of layoutData.layouts) {
               if (layout.name) layoutNames.push(layout.name);
             }
           }
-          // Also check recordTypeMappings for layout names
-          if (layoutData.recordTypeMappings) {
-            for (const rtm of layoutData.recordTypeMappings) {
-              if (rtm.layoutId && rtm.name) {
-                // Try to find layout name by ID
-              }
-            }
-          }
-
           if (layoutNames.length > 0) {
             metadataContext += 'Page Layouts for ' + objName + ':\n';
-            layoutNames.forEach(n => { metadataContext += '  - ' + n + '\n'; });
+            layoutNames.forEach(n => { metadataContext += ' - ' + n + '\n'; });
             metadataContext += '\n';
           }
         } catch (le) {
-          // Try alternate endpoint
           try {
             const layoutRes2 = await axios.get(
               instanceUrl + '/services/data/v57.0/query/?q=' +
@@ -177,7 +160,7 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
             );
             if (layoutRes2.data.records && layoutRes2.data.records.length > 0) {
               metadataContext += 'Page Layouts for ' + objName + ':\n';
-              layoutRes2.data.records.forEach(r => { metadataContext += '  - ' + r.Name + '\n'; });
+              layoutRes2.data.records.forEach(r => { metadataContext += ' - ' + r.Name + '\n'; });
               metadataContext += '\n';
             }
           } catch (le2) {
@@ -189,7 +172,6 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
       }
     }
 
-    // 4. Get profiles
     try {
       const profileRes = await axios.get(
         instanceUrl + '/services/data/v57.0/query/?q=' + encodeURIComponent("SELECT Id, Name FROM Profile ORDER BY Name LIMIT 20"),
@@ -202,7 +184,6 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
     } catch (pe) {
       console.log('Profile fetch failed:', pe.message);
     }
-
   } catch (e) {
     console.error('Metadata error:', e.message);
   }
@@ -218,114 +199,53 @@ async function getDesignSpec(message, accessToken, instanceUrl, exportType) {
   const baseInstruction = `CRITICAL FORMATTING RULES - YOU MUST FOLLOW THESE EXACTLY:
 1. NEVER use markdown tables (no pipe characters | for tables, no ------ separators)
 2. NEVER use --- as a horizontal rule
-3. For ANY tabular data (field specs, attribute/value pairs), use this EXACT format:
+3. Use ## for main section headings, ### for sub-headings
+4. Use plain bullet points (- ) for lists
+5. Write in clean prose paragraphs for descriptions
+6. For the Testing Checklist, output ONLY using this EXACT marker format (one per line):
+   TEST_ROW: <Step #> | <Step Description> | <Expected Result>
+   Example:
+   TEST_ROW: Step 1 | Log in as a user with the Field Sales Representative profile | Login successful
+7. For field/profile/layout specs use this EXACT format:
    FIELD: <field label>
    - API Name: <value>
    - Type: <value>
    - Values: <value>
    - Required: Yes/No
    - Help Text: <value>
-   (blank line between each field)
-4. Use ## for main headings, ### for sub-headings
-5. Use plain bullet points (- ) for lists
-6. Write in clean prose paragraphs for descriptions
 
 Always generate the COMPLETE specification immediately. Never ask for more details.
 If something is not specified, make a reasonable Salesforce best-practice assumption and note it.
-Use the EXACT page layout names and profile names from the metadata provided - never say "default layout".
-`;
+Use the EXACT page layout names and profile names from the metadata provided - never say "default layout".`;
 
-  let exportInstruction = '';
-  if (exportType === 'word') {
-    exportInstruction = `
-Structure your response with these exact sections:
+  const exportInstruction = `
+Structure your response with EXACTLY these 4 sections in this order:
 
-## Design Specification Document
+## 1. Requirement
+Write the requirement as stated by the user in 2-3 clear sentences.
 
-### 1. Requirement Summary
-(2-3 sentence summary)
+## 2. User Story
+### Summary
+Write a concise one-line user story in the format: "As a <role>, I want to <action> so that <benefit>."
 
-### 2. Object Details
-FIELD: Object Overview
-- Object Name: <value>
-- API Name: <value>
-- Object Type: Standard/Custom
-- Purpose: <value>
-- Customization Type: New Custom Field Addition
+### Detailed Acceptance Criteria
+List each acceptance criterion as a bullet point (- ), being specific and testable. Reference exact field names, picklist values, profile names and layout names from the Salesforce metadata.
 
-### 3. Field Specifications
-For EACH field, use this block format (NO TABLES):
+### Description / Additional Notes
+Write 2-4 sentences of additional context. Example style: "Consent Given field will have Yes and No as picklist values to select from. For all other profiles, Consent Given field is not displayed on their respective layouts."
 
-FIELD: Custom Flag
-- API Name: Custom_Flag__c
-- Field Type: Picklist
-- Picklist Values: Yes, No
-- Required: No
-- Default Value: None
-- Help Text: <suggested help text>
-- Description: <purpose>
-
-### 4. Profile and Permission Settings
-For each profile from the metadata, specify:
-
-PROFILE: <Exact Profile Name from metadata>
-- Field Access: Read/Write or Read Only or Hidden
-- Visibility: Visible/Hidden
-
-### 5. Page Layout Settings
-Use the EXACT page layout names from the metadata. For each layout:
-
-LAYOUT: <Exact Layout Name from metadata>
-- Action: Add field
-- Section: <recommended section>
-- Position: <left column / right column>
-- Required on Layout: Yes/No
-
-### 6. Validation Rules
-(List any needed validation rules or state "None required")
-
-### 7. Implementation Steps
+## 3. Implementation Steps
+Number each step clearly. Be specific - reference exact Salesforce Setup paths, field API names, layout names and profile names from the metadata.
 1. Step one
 2. Step two
 3. Step three
 
-### 8. Testing Checklist
-- Test case one
-- Test case two
-`;
-  } else if (exportType === 'excel') {
-    exportInstruction = `
-Structure with these sections. NO TABLES, NO PIPE CHARACTERS:
-
-## Design Specification
-
-### Requirement Summary
-(Brief summary)
-
-### Field Specifications
-For each field:
-FIELD: <label>
-- API Name: <value>
-- Type: <value>
-- Values: <value>
-- Required: Yes/No
-- Profile Access: <profile name> - Read/Write
-
-### Page Layout Settings
-LAYOUT: <Exact layout name from metadata>
-- Section: <name>
-- Position: Left/Right
-
-### Implementation Steps
-1. Step one
-2. Step two
-`;
-  } else {
-    exportInstruction = `
-Structure your response with clear sections. NO TABLES, NO PIPE CHARACTERS.
-Include: Requirement summary, Field specifications (using FIELD: blocks), Profile settings, Page layout settings (using exact layout names), Implementation steps, Testing checklist.
-`;
-  }
+## 4. Testing Checklist
+Output ONLY TEST_ROW markers - one per test step - in this exact format:
+TEST_ROW: Step 1 | <step description referencing exact profile/layout/field from metadata> | <expected result>
+TEST_ROW: Step 2 | <step description> | <expected result>
+TEST_ROW: Step 3 | <step description> | <expected result>
+(include at least 5 meaningful test steps)`;
 
   const claudeRes = await anthropic.messages.create({
     model: 'claude-opus-4-5',
@@ -372,14 +292,12 @@ function makeTextRuns(text) {
 }
 
 // ——————————————————————————
-// HELPER: Build a styled 2-column Word table from key:value pairs
+// HELPER: Build styled 2-column Word table from key:value pairs
 // ——————————————————————————
 function buildKeyValueTable(rows) {
   const borderStyle = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
   const tableRows = rows.map((row, idx) => {
-    const isHeader = idx === 0 && row.isHeader;
-    const bgColor = isHeader ? '1F4E79' : (idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF');
-    const textColor = isHeader ? 'FFFFFF' : '000000';
+    const bgColor = idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF';
     return new TableRow({
       children: [
         new TableCell({
@@ -387,7 +305,7 @@ function buildKeyValueTable(rows) {
           shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
           borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
           children: [new Paragraph({
-            children: [new TextRun({ text: row.key, bold: true, color: textColor, size: 20, font: 'Calibri' })],
+            children: [new TextRun({ text: row.key, bold: true, color: '000000', size: 20, font: 'Calibri' })],
             spacing: { before: 60, after: 60 }
           })]
         }),
@@ -396,17 +314,55 @@ function buildKeyValueTable(rows) {
           shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
           borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
           children: [new Paragraph({
-            children: [new TextRun({ text: row.value, color: textColor, size: 20, font: 'Calibri' })],
+            children: [new TextRun({ text: row.value, color: '000000', size: 20, font: 'Calibri' })],
             spacing: { before: 60, after: 60 }
           })]
         })
       ]
     });
   });
-  return new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
-    rows: tableRows
+  return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows });
+}
+
+// ——————————————————————————
+// HELPER: Build Testing Checklist Word table
+// ——————————————————————————
+function buildTestingTable(testRows) {
+  const headerBorder = { style: BorderStyle.SINGLE, size: 2, color: '1F4E79' };
+  const cellBorder = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
+
+  const headerCells = ['Step #', 'Step Description', 'Expected Result', 'Actual Result'].map((title, idx) => {
+    const widths = [10, 35, 35, 20];
+    return new TableCell({
+      width: { size: widths[idx], type: WidthType.PERCENTAGE },
+      shading: { fill: '1F4E79', type: ShadingType.CLEAR, color: '1F4E79' },
+      borders: { top: headerBorder, bottom: headerBorder, left: headerBorder, right: headerBorder },
+      children: [new Paragraph({
+        children: [new TextRun({ text: title, bold: true, color: 'FFFFFF', size: 20, font: 'Calibri' })],
+        spacing: { before: 80, after: 80 }
+      })]
+    });
   });
+
+  const rows = [new TableRow({ children: headerCells })];
+
+  testRows.forEach((row, idx) => {
+    const bgColor = idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF';
+    const widths = [10, 35, 35, 20];
+    const values = [row.step, row.description, row.expected, ''];
+    const cells = values.map((val, ci) => new TableCell({
+      width: { size: widths[ci], type: WidthType.PERCENTAGE },
+      shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
+      borders: { top: cellBorder, bottom: cellBorder, left: cellBorder, right: cellBorder },
+      children: [new Paragraph({
+        children: [new TextRun({ text: val, size: 20, font: 'Calibri' })],
+        spacing: { before: 80, after: 80 }
+      })]
+    }));
+    rows.push(new TableRow({ children: cells }));
+  });
+
+  return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows });
 }
 
 // ——————————————————————————
@@ -428,28 +384,15 @@ function parseToWordElements(specText, requirementText) {
   elements.push(new Paragraph({
     children: [new TextRun({ text: 'Generated: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), size: 20, color: '666666', font: 'Calibri' })],
     alignment: AlignmentType.CENTER,
-    spacing: { after: 100 }
+    spacing: { after: 300 }
   }));
 
-  // Requirement line
-  if (requirementText) {
-    elements.push(new Paragraph({
-      children: [
-        new TextRun({ text: 'Requirement: ', bold: true, size: 20, color: '1F4E79', font: 'Calibri' }),
-        new TextRun({ text: requirementText, size: 20, font: 'Calibri' })
-      ],
-      spacing: { after: 400 },
-      border: { bottom: { style: BorderStyle.SINGLE, size: 2, color: '1F4E79' } }
-    }));
-  }
-
-  // Collect FIELD: blocks and their attributes
   let fieldBlock = null;
   let fieldRows = [];
+  let testRows = [];
 
   const flushFieldBlock = () => {
     if (fieldBlock && fieldRows.length > 0) {
-      // Header row for the field table
       elements.push(new Paragraph({
         children: [new TextRun({ text: fieldBlock, bold: true, size: 22, color: 'FFFFFF', font: 'Calibri' })],
         shading: { type: ShadingType.CLEAR, fill: '2E75B6', color: '2E75B6' },
@@ -462,55 +405,63 @@ function parseToWordElements(specText, requirementText) {
     }
   };
 
+  const flushTestingTable = () => {
+    if (testRows.length > 0) {
+      elements.push(buildTestingTable(testRows));
+      elements.push(new Paragraph({ text: '', spacing: { after: 200 } }));
+      testRows = [];
+    }
+  };
+
   while (i < lines.length) {
     const line = lines[i];
     const trimmed = line.trim();
 
-    // Skip markdown table lines entirely
-    if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed)) {
+    if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed)) { i++; continue; }
+    if (/^---+$/.test(trimmed) || /^===+$/.test(trimmed)) { i++; continue; }
+
+    // TEST_ROW marker
+    if (/^TEST_ROW:\s*(.+)/.test(trimmed)) {
+      flushFieldBlock();
+      const content = trimmed.replace(/^TEST_ROW:\s*/, '');
+      const parts = content.split('|').map(p => p.trim());
+      testRows.push({ step: parts[0] || '', description: parts[1] || '', expected: parts[2] || '' });
       i++;
       continue;
     }
 
-    // Skip horizontal rules
-    if (/^---+$/.test(trimmed) || /^===+$/.test(trimmed)) {
-      i++;
-      continue;
+    // Flush test table when new heading arrives
+    if (/^##/.test(trimmed) && testRows.length > 0) {
+      flushTestingTable();
     }
 
-    // Detect FIELD: block header
+    // FIELD: block
     if (/^FIELD:\s*(.+)/.test(trimmed)) {
       flushFieldBlock();
       fieldBlock = trimmed.replace(/^FIELD:\s*/, '');
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // Detect PROFILE: or LAYOUT: block headers (same treatment as FIELD:)
+    // PROFILE: or LAYOUT: block
     if (/^(PROFILE|LAYOUT):\s*(.+)/.test(trimmed)) {
       flushFieldBlock();
       const m = trimmed.match(/^(PROFILE|LAYOUT):\s*(.+)/);
       fieldBlock = m[1] + ': ' + m[2];
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // If we're inside a field/profile/layout block, collect - key: value lines
     if (fieldBlock && /^-\s+[\w\s]+:\s*.+/.test(trimmed)) {
       const colonIdx = trimmed.indexOf(':');
       const key = trimmed.substring(1, colonIdx).trim();
       const value = trimmed.substring(colonIdx + 1).trim();
       fieldRows.push({ key, value });
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // If we encounter a non-list line while in a field block, flush it
     if (fieldBlock && trimmed !== '' && !/^-/.test(trimmed)) {
       flushFieldBlock();
     }
 
-    // H1 heading
     if (/^##\s/.test(trimmed)) {
       const text = trimmed.replace(/^##\s*/, '');
       elements.push(new Paragraph({
@@ -518,33 +469,27 @@ function parseToWordElements(specText, requirementText) {
         border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: '1F4E79' } },
         spacing: { before: 480, after: 160 }
       }));
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // H2 heading
     if (/^###\s/.test(trimmed)) {
       const text = trimmed.replace(/^###\s*/, '');
       elements.push(new Paragraph({
         children: [new TextRun({ text, bold: true, size: 24, color: '2E75B6', font: 'Calibri' })],
         spacing: { before: 320, after: 120 }
       }));
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // H3 heading
     if (/^####\s/.test(trimmed)) {
       const text = trimmed.replace(/^####\s*/, '');
       elements.push(new Paragraph({
         children: [new TextRun({ text, bold: true, size: 22, color: '2E75B6', font: 'Calibri' })],
         spacing: { before: 200, after: 80 }
       }));
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // Numbered list
     if (/^\d+\.\s/.test(trimmed)) {
       const text = trimmed.replace(/^\d+\.\s*/, '');
       elements.push(new Paragraph({
@@ -552,11 +497,9 @@ function parseToWordElements(specText, requirementText) {
         numbering: { reference: 'default-numbering', level: 0 },
         spacing: { after: 80 }
       }));
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // Bullet list
     if (/^[-*•]\s/.test(trimmed)) {
       const text = trimmed.replace(/^[-*•]\s*/, '');
       elements.push(new Paragraph({
@@ -564,18 +507,14 @@ function parseToWordElements(specText, requirementText) {
         bullet: { level: 0 },
         spacing: { after: 80 }
       }));
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // Empty line
     if (!trimmed) {
       elements.push(new Paragraph({ text: '', spacing: { after: 80 } }));
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // Normal paragraph
     elements.push(new Paragraph({
       children: makeTextRuns(trimmed),
       spacing: { after: 120 }
@@ -584,6 +523,7 @@ function parseToWordElements(specText, requirementText) {
   }
 
   flushFieldBlock();
+  flushTestingTable();
   return elements;
 }
 
@@ -608,13 +548,7 @@ app.post('/api/export/word', async (req, res) => {
           levels: [{ level: 0, format: 'decimal', text: '%1.', alignment: AlignmentType.START, style: { paragraph: { indent: { left: 720, hanging: 260 } } } }]
         }]
       },
-      styles: {
-        default: {
-          document: {
-            run: { font: 'Calibri', size: 22 }
-          }
-        }
-      },
+      styles: { default: { document: { run: { font: 'Calibri', size: 22 } } } },
       sections: [{ properties: { page: { margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } }, children: docChildren }]
     });
 
@@ -677,9 +611,18 @@ app.post('/api/export/excel', async (req, res) => {
 
     let rowIdx = message ? 5 : 4;
     const lines = specText.split('\n');
+    const testRowsExcel = [];
+
     for (const line of lines) {
       const trimmed = line.trim();
-      // Skip markdown table lines and horizontal rules
+
+      if (/^TEST_ROW:\s*(.+)/.test(trimmed)) {
+        const rowContent = trimmed.replace(/^TEST_ROW:\s*/, '');
+        const parts = rowContent.split('|').map(p => p.trim());
+        testRowsExcel.push({ step: parts[0] || '', description: parts[1] || '', expected: parts[2] || '', actual: '' });
+        continue;
+      }
+
       if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed) || /^---+$/.test(trimmed)) continue;
       if (!trimmed) { rowIdx++; continue; }
 
@@ -703,7 +646,7 @@ app.post('/api/export/excel', async (req, res) => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E75B6' } };
         sheet1.getRow(rowIdx).height = 22;
       } else if (/^[-*]\s/.test(trimmed)) {
-        cell.value = '  • ' + trimmed.replace(/^[-*]\s*/, '').replace(/\*\*/g, '');
+        cell.value = ' - ' + trimmed.replace(/^[-*]\s*/, '').replace(/\*\*/g, '');
         cell.font = { name: 'Calibri', size: 11 };
         sheet1.getRow(rowIdx).height = 18;
       } else {
@@ -715,81 +658,45 @@ app.post('/api/export/excel', async (req, res) => {
       rowIdx++;
     }
 
-    // Sheet 2: Fields Summary
-    const sheet2 = workbook.addWorksheet('Fields Summary');
+    // Sheet 2: Testing Checklist
+    const sheet2 = workbook.addWorksheet('Testing Checklist');
     sheet2.columns = [
-      { header: 'Field API Name', key: 'apiName', width: 30 },
-      { header: 'Label', key: 'label', width: 30 },
-      { header: 'Field Type', key: 'type', width: 20 },
-      { header: 'Values / Length', key: 'values', width: 30 },
-      { header: 'Required', key: 'required', width: 12 },
-      { header: 'Profile Access', key: 'profile', width: 25 },
-      { header: 'Notes', key: 'notes', width: 40 }
+      { header: 'Step #', key: 'step', width: 12 },
+      { header: 'Step Description', key: 'description', width: 45 },
+      { header: 'Expected Result', key: 'expected', width: 40 },
+      { header: 'Actual Result', key: 'actual', width: 35 }
     ];
 
-    const hdr = sheet2.getRow(1);
-    hdr.eachCell(cell => {
-      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Calibri' };
+    const hdr2 = sheet2.getRow(1);
+    hdr2.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Calibri', size: 12 };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
-      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
       cell.border = { bottom: { style: 'medium', color: { argb: 'FF032D60' } } };
     });
-    hdr.height = 25;
+    hdr2.height = 30;
 
-    // Parse FIELD: blocks from specText
-    let currentField = null;
-    let fieldData = {};
-    let fieldRows2 = [];
-
-    const flushField = () => {
-      if (currentField) {
-        fieldRows2.push({
-          apiName: fieldData['api name'] || fieldData['api'] || currentField,
-          label: currentField,
-          type: fieldData['field type'] || fieldData['type'] || '',
-          values: fieldData['picklist values'] || fieldData['values'] || fieldData['values / length'] || '',
-          required: fieldData['required'] || 'No',
-          profile: fieldData['profile access'] || '',
-          notes: fieldData['description'] || fieldData['help text'] || ''
-        });
-      }
-    };
-
-    for (const line of lines) {
-      const t = line.trim();
-      if (/^FIELD:\s*(.+)/.test(t)) {
-        flushField();
-        currentField = t.replace(/^FIELD:\s*/, '');
-        fieldData = {};
-      } else if (currentField && /^-\s+[\w\s]+:\s*.+/.test(t)) {
-        const ci = t.indexOf(':');
-        const key = t.substring(1, ci).trim().toLowerCase();
-        const val = t.substring(ci + 1).trim();
-        fieldData[key] = val;
-      } else if (currentField && t && !/^-/.test(t)) {
-        flushField();
-        currentField = null;
-        fieldData = {};
-      }
-    }
-    flushField();
-
-    let fRowIdx = 2;
-    for (const fr of fieldRows2) {
-      const row = sheet2.addRow(fr);
+    let tRowIdx = 2;
+    for (const tr of testRowsExcel) {
+      const row = sheet2.addRow(tr);
       row.eachCell(cell => {
         cell.font = { name: 'Calibri', size: 11 };
-        cell.border = { bottom: { style: 'thin', color: { argb: 'FFE0E5EE' } } };
-        cell.alignment = { wrapText: true };
-        if (fRowIdx % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F8FF' } };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE0E5EE' } },
+          bottom: { style: 'thin', color: { argb: 'FFE0E5EE' } },
+          left: { style: 'thin', color: { argb: 'FFE0E5EE' } },
+          right: { style: 'thin', color: { argb: 'FFE0E5EE' } }
+        };
+        cell.alignment = { wrapText: true, vertical: 'top' };
+        if (tRowIdx % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F8FF' } };
       });
-      fRowIdx++;
+      sheet2.getRow(tRowIdx).height = 40;
+      tRowIdx++;
     }
 
-    if (fRowIdx === 2) {
-      sheet2.addRow({ apiName: 'See Design Specification tab', label: '', type: '', values: '', required: '', profile: '', notes: '' });
+    if (tRowIdx === 2) {
+      sheet2.addRow({ step: 'Step 1', description: 'See Design Specification tab for details', expected: '', actual: '' });
     }
-    sheet2.autoFilter = { from: 'A1', to: 'G1' };
 
     const filename = 'SF_Design_Spec_' + new Date().toISOString().slice(0, 10) + '.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

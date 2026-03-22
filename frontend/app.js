@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Track last message and response for export
   let lastMessage = '';
   let lastResponse = '';
+  let semanticPending = false; // true when waiting for user Yes/No on semantic warning
 
   // ——————————————
   // AUTO-EXPAND TEXTAREA
@@ -117,12 +118,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!message) return;
     addMessage(message, 'user');
     userInput.value = '';
-    // Reset textarea height after clearing
     userInput.style.height = 'auto';
     sendBtn.disabled = true;
     hideExportButtons();
+    hideSemanticButtons();
     const typingId = addTyping();
-
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -132,20 +132,26 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       const data = await res.json();
       removeTyping(typingId);
-
       if (res.ok) {
         lastMessage = message;
         lastResponse = data.response;
         addMessage(data.response, 'bot');
-        showExportButtons();
-
-        // Auto-trigger export if user asked for Word or Excel
-        if (data.exportIntent && data.exportIntent.isWord) {
-          addSystemMessage('\uD83D\uDCC4 Generating your Word document...');
-          await triggerExport('word');
-        } else if (data.exportIntent && data.exportIntent.isExcel) {
-          addSystemMessage('\uD83D\uDCCA Generating your Excel file...');
-          await triggerExport('excel');
+        if (data.isSemantic) {
+          semanticPending = true;
+          showSemanticButtons();
+        } else if (data.isSemanticResolved || data.isConflict) {
+          semanticPending = false;
+          hideSemanticButtons();
+        } else {
+          semanticPending = false;
+          showExportButtons();
+          if (data.exportIntent && data.exportIntent.isWord) {
+            addSystemMessage('\uD83D\uDCC4 Generating your Word document...');
+            await triggerExport('word');
+          } else if (data.exportIntent && data.exportIntent.isExcel) {
+            addSystemMessage('\uD83D\uDCCA Generating your Excel file...');
+            await triggerExport('excel');
+          }
         }
       } else if (res.status === 401) {
         addMessage('Your session expired. Please log in again.', 'error');
@@ -204,6 +210,58 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+
+  // ——————————————
+  // Semantic Yes/No handlers
+  // ——————————————
+  const semanticYesBtn = document.getElementById('semanticYesBtn');
+  const semanticNoBtn = document.getElementById('semanticNoBtn');
+
+  async function sendSemanticAnswer(answer) {
+    hideSemanticButtons();
+    hideExportButtons();
+    semanticPending = false;
+    const typingId = addTyping();
+    sendBtn.disabled = true;
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ message: '', semanticAnswer: answer })
+      });
+      const data = await res.json();
+      removeTyping(typingId);
+      if (res.ok) {
+        lastResponse = data.response;
+        addMessage(data.response, 'bot');
+        if (!data.isSemanticResolved && data.exportIntent) {
+          if (data.exportIntent.isWord) {
+            showExportButtons();
+            addSystemMessage('\uD83D\uDCC4 Generating your Word document...');
+            await triggerExport('word');
+          } else if (data.exportIntent.isExcel) {
+            showExportButtons();
+            addSystemMessage('\uD83D\uDCCA Generating your Excel file...');
+            await triggerExport('excel');
+          } else {
+            showExportButtons();
+          }
+        }
+      } else {
+        addMessage('Error: ' + (data.error || 'Something went wrong.'), 'error');
+      }
+    } catch (err) {
+      removeTyping(typingId);
+      addMessage('Network error: ' + err.message, 'error');
+    } finally {
+      sendBtn.disabled = false;
+    }
+  }
+
+  if (semanticYesBtn) semanticYesBtn.addEventListener('click', () => sendSemanticAnswer('yes'));
+  if (semanticNoBtn) semanticNoBtn.addEventListener('click', () => sendSemanticAnswer('no'));
+
   // Export buttons (manual click)
   if (exportWordBtn) {
     exportWordBtn.addEventListener('click', async () => {
@@ -258,6 +316,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (exportRow) exportRow.classList.add('hidden');
   }
 
+  function showSemanticButtons() {
+    const semRow = document.getElementById('semanticRow');
+    if (semRow) semRow.classList.remove('hidden');
+  }
+  function hideSemanticButtons() {
+    const semRow = document.getElementById('semanticRow');
+    if (semRow) semRow.classList.add('hidden');
+  }
   function addMessage(text, type) {
     const div = document.createElement('div');
     div.className = type === 'user' ? 'message-row user-row' : 'message-row bot-row';

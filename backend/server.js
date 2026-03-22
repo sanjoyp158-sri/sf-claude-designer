@@ -92,6 +92,148 @@ function detectExportIntent(message) {
   return { isWord, isExcel, isAny: isWord || isExcel };
 }
 
+// ——————————————————————————
+// HELPER: Validate metadata - check for conflicts before generating spec
+// ——————————————————————————
+async function validateMetadataConflicts(message, accessToken, instanceUrl) {
+  const conflicts = [];
+  const msgLower = message.toLowerCase();
+
+  // Extract object names from message
+  const objMatches = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g) || [];
+  const commonObjects = ['Account','Contact','Opportunity','Lead','Case','Task','Event','Campaign','Product2','Contract','Order','Quote'];
+  const mentionedObjects = [];
+  for (const obj of commonObjects) {
+    if (msgLower.includes(obj.toLowerCase())) mentionedObjects.push(obj);
+  }
+  for (const obj of objMatches) {
+    if (!mentionedObjects.includes(obj)) mentionedObjects.push(obj);
+  }
+  if (mentionedObjects.length === 0) return { hasConflicts: false, conflicts: [] };
+
+  // Extract candidate field names from patterns like "field called X", "add X field"
+  const fieldNameRegexes = [
+    /field(?:\s+called|\s+named|\s+for)?\s+["'`]?([\w\s]+)["'`]?/gi,
+    /(?:add|create|new)\s+["'`]?([\w\s]+)["'`]?\s+field/gi,
+    /["'`]([\w\s]+)["'`]\s+(?:field|picklist|checkbox|text|number|date|lookup)/gi
+  ];
+  const candidateFieldNames = new Set();
+  for (const rx of fieldNameRegexes) {
+    rx.lastIndex = 0;
+    let m;
+    while ((m = rx.exec(message)) !== null) {
+      const n = m[1].trim().toLowerCase().replace(/\s+/g, ' ');
+      if (n.length > 1 && n.length < 50) candidateFieldNames.add(n);
+    }
+  }
+
+  // Extract candidate picklist values
+  const picklistRegexes = [
+    /(?:picklist\s+values?|values?\s+(?:like|such as|including|of))\s*[:"'`]?\s*([\w\s,\/&-]+)/gi,
+    /(?:add|create|new)\s+(?:picklist\s+)?values?\s+["'`]?([\w\s,\/&-]+)["'`]?/gi,
+    /values?\s*(?:should\s+be|will\s+be|are)\s*["'`]?([\w\s,\/&-]+)["'`]?/gi
+  ];
+  const candidatePicklistValues = new Set();
+  for (const rx of picklistRegexes) {
+    rx.lastIndex = 0;
+    let m;
+    while ((m = rx.exec(message)) !== null) {
+      m[1].trim().split(/[,\/]/).forEach(v => {
+        const val = v.trim().replace(/\band\b/gi, '').trim();
+        if (val.length > 0 && val.length < 50) candidatePicklistValues.add(val.toLowerCase());
+      });
+    }
+  }
+
+  for (const objName of mentionedObjects.slice(0, 2)) {
+    try {
+      const objRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/', {
+        headers: { Authorization: 'Bearer ' + accessToken }
+      });
+      const existingFields = objRes.data.fields;
+
+      // Check 1: Field name conflict
+      for (const candidateName of candidateFieldNames) {
+        for (const field of existingFields) {
+          const existingLabel = field.label.toLowerCase();
+          const existingApi = field.name.toLowerCase().replace(/__c$/, '').replace(/_/g, ' ');
+          if (existingLabel === candidateName || existingApi === candidateName ||
+              existingLabel.includes(candidateName) || candidateName.includes(existingLabel)) {
+            conflicts.push({
+              type: 'FIELD_EXISTS',
+              message: '\u26a0\ufe0f Field Conflict Detected on ' + objName + '\n\n' +
+                'A field with a similar name already exists:\n' +
+                '\u2022 Label: "' + field.label + '"\n' +
+                '\u2022 API Name: ' + field.name + '\n' +
+                '\u2022 Type: ' + field.type + '\n\n' +
+                'The field "' + candidateName + '" you are trying to create already exists in the ' + objName + ' object. ' +
+                'Please review the existing field before creating a new one.\n\n' +
+                'If you intended to modify the existing field or add picklist values to it, please clarify your requirement.'
+            });
+            break;
+          }
+        }
+        if (conflicts.length > 0) break;
+      }
+
+      // Check 2: Picklist value conflict
+      if (candidatePicklistValues.size > 0 && conflicts.length === 0) {
+        for (const field of existingFields) {
+          if (field.type !== 'picklist' || !field.picklistValues || field.picklistValues.length === 0) continue;
+
+          // If we have a candidate field name, check only matching fields; otherwise check all picklist fields
+          let shouldCheck = candidateFieldNames.size === 0;
+          if (!shouldCheck) {
+            for (const cn of candidateFieldNames) {
+              const lbl = field.label.toLowerCase();
+              const api = field.name.toLowerCase().replace(/__c$/, '').replace(/_/g, ' ');
+              if (lbl.includes(cn) || cn.includes(lbl) || api.includes(cn) || cn.includes(api)) {
+                shouldCheck = true; break;
+              }
+            }
+          }
+          if (!shouldCheck) continue;
+
+          const activeConflicts = [];
+          const inactiveConflicts = [];
+          for (const candidate of candidatePicklistValues) {
+            for (const pv of field.picklistValues) {
+              const pvLow = pv.value.toLowerCase();
+              if (pvLow === candidate || pvLow.includes(candidate) || candidate.includes(pvLow)) {
+                if (pv.active) activeConflicts.push('"' + pv.value + '" (Active)');
+                else inactiveConflicts.push('"' + pv.value + '" (Inactive)');
+                break;
+              }
+            }
+          }
+
+          if (activeConflicts.length > 0 || inactiveConflicts.length > 0) {
+            const allConflicting = [...activeConflicts, ...inactiveConflicts];
+            const activeVals = field.picklistValues.filter(p => p.active).map(p => '"' + p.value + '"').join(', ') || 'None';
+            const inactiveVals = field.picklistValues.filter(p => !p.active).map(p => '"' + p.value + '"').join(', ') || 'None';
+            conflicts.push({
+              type: 'PICKLIST_VALUE_EXISTS',
+              message: '\u26a0\ufe0f Picklist Value Conflict Detected on ' + objName + ' > ' + field.label + '\n\n' +
+                'The following picklist value(s) you are trying to add already exist:\n' +
+                allConflicting.map(v => '  \u2022 ' + v).join('\n') + '\n\n' +
+                'Active values currently on this field: ' + activeVals + '\n' +
+                'Inactive values: ' + inactiveVals + '\n\n' +
+                'Please review the existing picklist values before adding duplicates. ' +
+                'If you want to reactivate an inactive value, please clarify that in your requirement.'
+            });
+            break;
+          }
+        }
+      }
+
+    } catch (e) {
+      console.log('Validation check failed for', objName, e.message);
+    }
+  }
+
+  return { hasConflicts: conflicts.length > 0, conflicts };
+}
+
 async function getSalesforceMetadata(message, accessToken, instanceUrl) {
   let metadataContext = '';
   try {
@@ -265,10 +407,21 @@ ${metadataContext}`,
   return claudeRes.content[0].text;
 }
 
-app.post('/api/chat', async (req, res) => {
+app.app.post('/api/chat', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated with Salesforce' });
   const { message } = req.body;
   try {
+    // Step 1: Validate metadata for conflicts before generating spec
+    const validation = await validateMetadataConflicts(message, req.session.sfAccessToken, req.session.sfInstanceUrl);
+    if (validation.hasConflicts) {
+      const conflictMsg = validation.conflicts.map(c => c.message).join('\n\n');
+      return res.json({
+        response: conflictMsg,
+        exportIntent: { isWord: false, isExcel: false, isAny: false },
+        isConflict: true
+      });
+    }
+    // Step 2: No conflicts - generate the design spec
     const intent = detectExportIntent(message);
     let exportType = null;
     if (intent.isWord) exportType = 'word';
@@ -280,207 +433,6 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-function makeTextRuns(text) {
-  const parts = text.split(/\*\*(.*?)\*\*/g);
-  return parts.map((part, i) => new TextRun({ text: part, bold: i % 2 === 1, size: 22, font: 'Calibri' }));
-}
-
-function buildKeyValueTable(rows) {
-  const borderStyle = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
-  const tableRows = rows.map((row, idx) => {
-    const bgColor = idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF';
-    return new TableRow({
-      children: [
-        new TableCell({
-          width: { size: 35, type: WidthType.PERCENTAGE },
-          shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
-          borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
-          children: [new Paragraph({ children: [new TextRun({ text: row.key, bold: true, color: '000000', size: 20, font: 'Calibri' })], spacing: { before: 60, after: 60 } })]
-        }),
-        new TableCell({
-          width: { size: 65, type: WidthType.PERCENTAGE },
-          shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
-          borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
-          children: [new Paragraph({ children: [new TextRun({ text: row.value, color: '000000', size: 20, font: 'Calibri' })], spacing: { before: 60, after: 60 } })]
-        })
-      ]
-    });
-  });
-  return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows });
-}
-
-function buildTestingTable(testRows) {
-  const headerBorder = { style: BorderStyle.SINGLE, size: 2, color: '1F4E79' };
-  const cellBorder = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
-  const headerCells = ['Step #', 'Step Description', 'Expected Result', 'Actual Result'].map((title, idx) => {
-    const widths = [10, 35, 35, 20];
-    return new TableCell({
-      width: { size: widths[idx], type: WidthType.PERCENTAGE },
-      shading: { fill: '1F4E79', type: ShadingType.CLEAR, color: '1F4E79' },
-      borders: { top: headerBorder, bottom: headerBorder, left: headerBorder, right: headerBorder },
-      children: [new Paragraph({ children: [new TextRun({ text: title, bold: true, color: 'FFFFFF', size: 20, font: 'Calibri' })], spacing: { before: 80, after: 80 } })]
-    });
-  });
-  const rows = [new TableRow({ children: headerCells })];
-  testRows.forEach((row, idx) => {
-    const bgColor = idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF';
-    const widths = [10, 35, 35, 20];
-    const values = [row.step, row.description, row.expected, ''];
-    const cells = values.map((val, ci) => new TableCell({
-      width: { size: widths[ci], type: WidthType.PERCENTAGE },
-      shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
-      borders: { top: cellBorder, bottom: cellBorder, left: cellBorder, right: cellBorder },
-      children: [new Paragraph({ children: [new TextRun({ text: val, size: 20, font: 'Calibri' })], spacing: { before: 80, after: 80 } })]
-    }));
-    rows.push(new TableRow({ children: cells }));
-  });
-  return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows });
-}
-
-function parseToWordElements(specText, requirementText) {
-  const lines = specText.split('\n');
-  const elements = [];
-  let i = 0;
-
-  elements.push(new Paragraph({
-    children: [new TextRun({ text: 'Salesforce Life Science Cloud Design Specification', bold: true, size: 48, color: '1F4E79', font: 'Calibri' })],
-    alignment: AlignmentType.CENTER,
-    spacing: { after: 200 }
-  }));
-  elements.push(new Paragraph({
-    children: [new TextRun({ text: 'Generated: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), size: 20, color: '666666', font: 'Calibri' })],
-    alignment: AlignmentType.CENTER,
-    spacing: { after: 300 }
-  }));
-
-  let fieldBlock = null;
-  let fieldRows = [];
-  let testRows = [];
-
-  const flushFieldBlock = () => {
-    if (fieldBlock && fieldRows.length > 0) {
-      elements.push(new Paragraph({
-        children: [new TextRun({ text: fieldBlock, bold: true, size: 22, color: 'FFFFFF', font: 'Calibri' })],
-        shading: { type: ShadingType.CLEAR, fill: '2E75B6', color: '2E75B6' },
-        spacing: { before: 120, after: 0 }
-      }));
-      elements.push(buildKeyValueTable(fieldRows));
-      elements.push(new Paragraph({ text: '', spacing: { after: 200 } }));
-      fieldBlock = null;
-      fieldRows = [];
-    }
-  };
-
-  const flushTestingTable = () => {
-    if (testRows.length > 0) {
-      elements.push(buildTestingTable(testRows));
-      elements.push(new Paragraph({ text: '', spacing: { after: 200 } }));
-      testRows = [];
-    }
-  };
-
-  while (i < lines.length) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed)) { i++; continue; }
-    if (/^---+$/.test(trimmed) || /^===+$/.test(trimmed)) { i++; continue; }
-
-    if (/^TEST_ROW:\s*(.+)/.test(trimmed)) {
-      flushFieldBlock();
-      const content = trimmed.replace(/^TEST_ROW:\s*/, '');
-      const parts = content.split('|').map(p => p.trim());
-      testRows.push({ step: parts[0] || '', description: parts[1] || '', expected: parts[2] || '' });
-      i++; continue;
-    }
-
-    if (/^##/.test(trimmed) && testRows.length > 0) flushTestingTable();
-
-    if (/^FIELD:\s*(.+)/.test(trimmed)) {
-      flushFieldBlock();
-      fieldBlock = trimmed.replace(/^FIELD:\s*/, '');
-      i++; continue;
-    }
-
-    if (/^(PROFILE|LAYOUT):\s*(.+)/.test(trimmed)) {
-      flushFieldBlock();
-      const m = trimmed.match(/^(PROFILE|LAYOUT):\s*(.+)/);
-      fieldBlock = m[1] + ': ' + m[2];
-      i++; continue;
-    }
-
-    if (fieldBlock && /^-\s+[\w\s]+:\s*.+/.test(trimmed)) {
-      const colonIdx = trimmed.indexOf(':');
-      const key = trimmed.substring(1, colonIdx).trim();
-      const value = trimmed.substring(colonIdx + 1).trim();
-      fieldRows.push({ key, value });
-      i++; continue;
-    }
-
-    if (fieldBlock && trimmed !== '' && !/^-/.test(trimmed)) flushFieldBlock();
-
-    if (/^##\s/.test(trimmed)) {
-      const text = trimmed.replace(/^##\s*/, '');
-      elements.push(new Paragraph({
-        children: [new TextRun({ text, bold: true, size: 28, color: '1F4E79', font: 'Calibri' })],
-        border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: '1F4E79' } },
-        spacing: { before: 480, after: 160 }
-      }));
-      i++; continue;
-    }
-
-    if (/^###\s/.test(trimmed)) {
-      const text = trimmed.replace(/^###\s*/, '');
-      elements.push(new Paragraph({
-        children: [new TextRun({ text, bold: true, size: 24, color: '2E75B6', font: 'Calibri' })],
-        spacing: { before: 320, after: 120 }
-      }));
-      i++; continue;
-    }
-
-    if (/^####\s/.test(trimmed)) {
-      const text = trimmed.replace(/^####\s*/, '');
-      elements.push(new Paragraph({
-        children: [new TextRun({ text, bold: true, size: 22, color: '2E75B6', font: 'Calibri' })],
-        spacing: { before: 200, after: 80 }
-      }));
-      i++; continue;
-    }
-
-    if (/^\d+\.\s/.test(trimmed)) {
-      const text = trimmed.replace(/^\d+\.\s*/, '');
-      elements.push(new Paragraph({
-        children: makeTextRuns(text),
-        numbering: { reference: 'default-numbering', level: 0 },
-        spacing: { after: 80 }
-      }));
-      i++; continue;
-    }
-
-    if (/^[-*•]\s/.test(trimmed)) {
-      const text = trimmed.replace(/^[-*•]\s*/, '');
-      elements.push(new Paragraph({
-        children: makeTextRuns(text),
-        bullet: { level: 0 },
-        spacing: { after: 80 }
-      }));
-      i++; continue;
-    }
-
-    if (!trimmed) {
-      elements.push(new Paragraph({ text: '', spacing: { after: 80 } }));
-      i++; continue;
-    }
-
-    elements.push(new Paragraph({ children: makeTextRuns(trimmed), spacing: { after: 120 } }));
-    i++;
-  }
-
-  flushFieldBlock();
-  flushTestingTable();
-  return elements;
-}
 
 app.post('/api/export/word', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated' });

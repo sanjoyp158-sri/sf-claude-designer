@@ -266,6 +266,56 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
   return { hasConflicts: conflicts.length > 0, conflicts };
 }
 
+// ——————————————————————————
+// HELPER: Semantic similarity check - detect conceptually similar existing fields
+// ——————————————————————————
+async function checkSemanticSimilarity(message, accessToken, instanceUrl) {
+  const msgLower = message.toLowerCase();
+  const commonObjects = ['Account','Contact','Opportunity','Lead','Case','Task','Event','Campaign','Product2','Contract','Order','Quote'];
+  const mentionedObjects = [];
+  for (const obj of commonObjects) {
+    if (msgLower.includes(obj.toLowerCase())) mentionedObjects.push(obj);
+  }
+  if (mentionedObjects.length === 0) return { hasSimilar: false, similarFields: [], objName: null };
+
+  const objName = mentionedObjects[0];
+  let existingFieldsList = [];
+  try {
+    const objRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/', {
+      headers: { Authorization: 'Bearer ' + accessToken }
+    });
+    existingFieldsList = objRes.data.fields.slice(0, 80).map(f => f.label + ' (' + f.type + ')');
+  } catch (e) {
+    console.log('Semantic check describe failed:', e.message);
+    return { hasSimilar: false, similarFields: [], objName };
+  }
+
+  if (existingFieldsList.length === 0) return { hasSimilar: false, similarFields: [], objName };
+
+  const prompt = 'You are a Salesforce metadata expert. A user wants to create a new field with this requirement:\n\n"' + message + '"\n\nBelow are the existing fields on the ' + objName + ' object:\n' + existingFieldsList.join('\n') + '\n\nYour task: Identify any existing fields that are CONCEPTUALLY SIMILAR to what the user wants to create — meaning they store the same or closely related kind of data, even if named differently.\n\nExamples of conceptual similarity:\n- "Tax Identification Number" is similar to "Social Security Number" / "SSN" / "National ID"\n- "Mobile Number" is similar to "Phone" / "Cell Phone" / "Contact Number"\n- "Revenue" is similar to "Annual Revenue" / "Total Sales"\n- "Full Name" is similar to "Name" / "Contact Name" / "Account Name"\n\nRules:\n- Only flag fields that truly serve the same data-storage purpose\n- Do NOT flag fields that are merely in the same general domain\n- Return ONLY a JSON array, no explanation\n- Each item: { "existingField": "<label>", "reason": "<one sentence why they are similar>" }\n- If NO conceptually similar field exists, return an empty array: []\n\nJSON array:';
+
+  try {
+    const claudeRes = await anthropic.messages.create({
+      model: 'claude-opus-4-5',
+      max_tokens: 800,
+      system: 'You are a Salesforce metadata expert. Always respond with valid JSON only, no markdown, no extra text.',
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const raw = claudeRes.content[0].text.trim();
+    const jsonMatch = raw.match(/\[.*\]/s);
+    if (!jsonMatch) return { hasSimilar: false, similarFields: [], objName };
+    const similarFields = JSON.parse(jsonMatch[0]);
+    return {
+      hasSimilar: Array.isArray(similarFields) && similarFields.length > 0,
+      similarFields: Array.isArray(similarFields) ? similarFields : [],
+      objName
+    };
+  } catch (e) {
+    console.log('Semantic similarity check failed:', e.message);
+    return { hasSimilar: false, similarFields: [], objName };
+  }
+}
+
 async function getSalesforceMetadata(message, accessToken, instanceUrl) {
   let metadataContext = '';
   try {
@@ -441,9 +491,39 @@ ${metadataContext}`,
 
 app.post('/api/chat', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated with Salesforce' });
-  const { message } = req.body;
+  const { message, semanticAnswer } = req.body;
+
   try {
-    // Step 1: Validate metadata for conflicts before generating spec
+    // ——— Handle semantic confirmation reply ———
+    if (semanticAnswer === 'yes') {
+      const pending = req.session.semanticPending;
+      req.session.semanticPending = null;
+      const similarFields = pending ? pending.similarFields : [];
+      const objName = pending ? pending.objName : 'the object';
+      const fieldList = similarFields.map(f => '  \u2022 ' + f.existingField + ' \u2014 ' + f.reason).join('\n');
+      return res.json({
+        response: '\u2705 Understood! Please use the existing field(s) on ' + objName + ' instead of creating a new one:\n\n' + fieldList + '\n\nNo design spec has been generated. If you need help configuring or updating the existing field, please describe what changes you need.',
+        exportIntent: { isWord: false, isExcel: false, isAny: false },
+        isSemanticResolved: true
+      });
+    }
+
+    if (semanticAnswer === 'no') {
+      const pending = req.session.semanticPending;
+      req.session.semanticPending = null;
+      if (!pending || !pending.originalMessage) {
+        return res.status(400).json({ error: 'No pending request found. Please re-submit your requirement.' });
+      }
+      const originalMessage = pending.originalMessage;
+      const intent = detectExportIntent(originalMessage);
+      let exportType = null;
+      if (intent.isWord) exportType = 'word';
+      else if (intent.isExcel) exportType = 'excel';
+      const response = await getDesignSpec(originalMessage, req.session.sfAccessToken, req.session.sfInstanceUrl, exportType);
+      return res.json({ response, exportIntent: intent });
+    }
+
+    // ——— Step 1: Hard conflict check (exact / name match) ———
     const validation = await validateMetadataConflicts(message, req.session.sfAccessToken, req.session.sfInstanceUrl);
     if (validation.hasConflicts) {
       const conflictMsg = validation.conflicts.map(c => c.message).join('\n\n');
@@ -453,18 +533,44 @@ app.post('/api/chat', async (req, res) => {
         isConflict: true
       });
     }
-    // Step 2: No conflicts - generate the design spec
+
+    // ——— Step 2: Semantic similarity check ———
+    const semantic = await checkSemanticSimilarity(message, req.session.sfAccessToken, req.session.sfInstanceUrl);
+    if (semantic.hasSimilar) {
+      req.session.semanticPending = {
+        originalMessage: message,
+        similarFields: semantic.similarFields,
+        objName: semantic.objName
+      };
+      const fieldLines = semantic.similarFields.map(f =>
+        '  \u2022 **' + f.existingField + '** \u2014 ' + f.reason
+      ).join('\n');
+      const warningMsg = '\uD83D\uDD0D Similar Existing Field(s) Found on ' + semantic.objName + '\n\n' +
+        'Before creating a new field, the following existing field(s) on **' + semantic.objName + '** may already serve the same purpose:\n\n' +
+        fieldLines + '\n\n' +
+        '**Would you like to use one of the existing fields instead of creating a new one?**\n\n' +
+        'Please click **Yes, use existing field** to reuse an existing field (no design spec will be generated), or **No, create new field** to proceed with a new field and generate the design spec.';
+      return res.json({
+        response: warningMsg,
+        exportIntent: { isWord: false, isExcel: false, isAny: false },
+        isSemantic: true
+      });
+    }
+
+    // ——— Step 3: No conflicts — generate design spec ———
     const intent = detectExportIntent(message);
     let exportType = null;
     if (intent.isWord) exportType = 'word';
     else if (intent.isExcel) exportType = 'excel';
     const response = await getDesignSpec(message, req.session.sfAccessToken, req.session.sfInstanceUrl, exportType);
     res.json({ response, exportIntent: intent });
+
   } catch (err) {
     console.error('Chat error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 function makeTextRuns(text) {
   const parts = text.split(/\*\*(.*?)\*\*/g);

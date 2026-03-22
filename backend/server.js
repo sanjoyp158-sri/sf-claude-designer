@@ -407,7 +407,7 @@ ${metadataContext}`,
   return claudeRes.content[0].text;
 }
 
-app.app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated with Salesforce' });
   const { message } = req.body;
   try {

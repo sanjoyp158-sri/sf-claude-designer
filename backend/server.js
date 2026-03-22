@@ -434,6 +434,198 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+function makeTextRuns(text) {
+  const parts = text.split(/\*\*(.*?)\*\*/g);
+  return parts.map((part, i) => new TextRun({ text: part, bold: i % 2 === 1, size: 22, font: 'Calibri' }));
+}
+
+function buildKeyValueTable(rows) {
+  const borderStyle = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
+  const tableRows = rows.map((row, idx) => {
+    const bgColor = idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF';
+    return new TableRow({
+      children: [
+        new TableCell({
+          width: { size: 35, type: WidthType.PERCENTAGE },
+          shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
+          borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
+          children: [new Paragraph({ children: [new TextRun({ text: row.key, bold: true, color: '000000', size: 20, font: 'Calibri' })], spacing: { before: 60, after: 60 } })]
+        }),
+        new TableCell({
+          width: { size: 65, type: WidthType.PERCENTAGE },
+          shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
+          borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
+          children: [new Paragraph({ children: [new TextRun({ text: row.value, color: '000000', size: 20, font: 'Calibri' })], spacing: { before: 60, after: 60 } })]
+        })
+      ]
+    });
+  });
+  return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows });
+}
+
+function buildTestingTable(testRows) {
+  const headerBorder = { style: BorderStyle.SINGLE, size: 2, color: '1F4E79' };
+  const cellBorder = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
+  const headerCells = ['Step #', 'Step Description', 'Expected Result', 'Actual Result'].map((title, idx) => {
+    const widths = [10, 35, 35, 20];
+    return new TableCell({
+      width: { size: widths[idx], type: WidthType.PERCENTAGE },
+      shading: { fill: '1F4E79', type: ShadingType.CLEAR, color: '1F4E79' },
+      borders: { top: headerBorder, bottom: headerBorder, left: headerBorder, right: headerBorder },
+      children: [new Paragraph({ children: [new TextRun({ text: title, bold: true, color: 'FFFFFF', size: 20, font: 'Calibri' })], spacing: { before: 80, after: 80 } })]
+    });
+  });
+  const rows = [new TableRow({ children: headerCells })];
+  testRows.forEach((row, idx) => {
+    const bgColor = idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF';
+    const widths = [10, 35, 35, 20];
+    const values = [row.step, row.description, row.expected, ''];
+    const cells = values.map((val, ci) => new TableCell({
+      width: { size: widths[ci], type: WidthType.PERCENTAGE },
+      shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
+      borders: { top: cellBorder, bottom: cellBorder, left: cellBorder, right: cellBorder },
+      children: [new Paragraph({ children: [new TextRun({ text: val, size: 20, font: 'Calibri' })], spacing: { before: 80, after: 80 } })]
+    }));
+    rows.push(new TableRow({ children: cells }));
+  });
+  return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows });
+}
+
+function parseToWordElements(specText, requirementText) {
+  const lines = specText.split('\n');
+  const elements = [];
+  let i = 0;
+
+  elements.push(new Paragraph({
+    children: [new TextRun({ text: 'Salesforce Life Science Cloud Design Specification', bold: true, size: 48, color: '1F4E79', font: 'Calibri' })],
+    alignment: AlignmentType.CENTER, spacing: { after: 200 }
+  }));
+  elements.push(new Paragraph({
+    children: [new TextRun({ text: 'Generated: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), size: 20, color: '666666', font: 'Calibri' })],
+    alignment: AlignmentType.CENTER, spacing: { after: 300 }
+  }));
+
+  let fieldBlock = null;
+  let fieldRows = [];
+  let testRows = [];
+
+  const flushFieldBlock = () => {
+    if (fieldBlock && fieldRows.length > 0) {
+      elements.push(new Paragraph({
+        children: [new TextRun({ text: fieldBlock, bold: true, size: 22, color: 'FFFFFF', font: 'Calibri' })],
+        shading: { type: ShadingType.CLEAR, fill: '2E75B6', color: '2E75B6' },
+        spacing: { before: 120, after: 0 }
+      }));
+      elements.push(buildKeyValueTable(fieldRows));
+      elements.push(new Paragraph({ text: '', spacing: { after: 200 } }));
+      fieldBlock = null; fieldRows = [];
+    }
+  };
+
+  const flushTestingTable = () => {
+    if (testRows.length > 0) {
+      elements.push(buildTestingTable(testRows));
+      elements.push(new Paragraph({ text: '', spacing: { after: 200 } }));
+      testRows = [];
+    }
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed)) { i++; continue; }
+    if (/^---+$/.test(trimmed) || /^===+$/.test(trimmed)) { i++; continue; }
+
+    if (/^TEST_ROW:\s*(.+)/.test(trimmed)) {
+      flushFieldBlock();
+      const content = trimmed.replace(/^TEST_ROW:\s*/, '');
+      const parts = content.split('|').map(p => p.trim());
+      testRows.push({ step: parts[0] || '', description: parts[1] || '', expected: parts[2] || '' });
+      i++; continue;
+    }
+
+    if (/^##/.test(trimmed) && testRows.length > 0) flushTestingTable();
+
+    if (/^FIELD:\s*(.+)/.test(trimmed)) {
+      flushFieldBlock();
+      fieldBlock = trimmed.replace(/^FIELD:\s*/, '');
+      i++; continue;
+    }
+
+    if (/^(PROFILE|LAYOUT):\s*(.+)/.test(trimmed)) {
+      flushFieldBlock();
+      const m = trimmed.match(/^(PROFILE|LAYOUT):\s*(.+)/);
+      fieldBlock = m[1] + ': ' + m[2];
+      i++; continue;
+    }
+
+    if (fieldBlock && /^-\s+[\w\s]+:\s*.+/.test(trimmed)) {
+      const colonIdx = trimmed.indexOf(':');
+      const key = trimmed.substring(1, colonIdx).trim();
+      const value = trimmed.substring(colonIdx + 1).trim();
+      fieldRows.push({ key, value });
+      i++; continue;
+    }
+
+    if (fieldBlock && trimmed !== '' && !/^-/.test(trimmed)) flushFieldBlock();
+
+    if (/^##\s/.test(trimmed)) {
+      elements.push(new Paragraph({
+        children: [new TextRun({ text: trimmed.replace(/^##\s*/, ''), bold: true, size: 28, color: '1F4E79', font: 'Calibri' })],
+        border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: '1F4E79' } },
+        spacing: { before: 480, after: 160 }
+      }));
+      i++; continue;
+    }
+
+    if (/^###\s/.test(trimmed)) {
+      elements.push(new Paragraph({
+        children: [new TextRun({ text: trimmed.replace(/^###\s*/, ''), bold: true, size: 24, color: '2E75B6', font: 'Calibri' })],
+        spacing: { before: 320, after: 120 }
+      }));
+      i++; continue;
+    }
+
+    if (/^####\s/.test(trimmed)) {
+      elements.push(new Paragraph({
+        children: [new TextRun({ text: trimmed.replace(/^####\s*/, ''), bold: true, size: 22, color: '2E75B6', font: 'Calibri' })],
+        spacing: { before: 200, after: 80 }
+      }));
+      i++; continue;
+    }
+
+    if (/^\d+\.\s/.test(trimmed)) {
+      elements.push(new Paragraph({
+        children: makeTextRuns(trimmed.replace(/^\d+\.\s*/, '')),
+        numbering: { reference: 'default-numbering', level: 0 },
+        spacing: { after: 80 }
+      }));
+      i++; continue;
+    }
+
+    if (/^[-*•]\s/.test(trimmed)) {
+      elements.push(new Paragraph({
+        children: makeTextRuns(trimmed.replace(/^[-*•]\s*/, '')),
+        bullet: { level: 0 }, spacing: { after: 80 }
+      }));
+      i++; continue;
+    }
+
+    if (!trimmed) {
+      elements.push(new Paragraph({ text: '', spacing: { after: 80 } }));
+      i++; continue;
+    }
+
+    elements.push(new Paragraph({ children: makeTextRuns(trimmed), spacing: { after: 120 } }));
+    i++;
+  }
+
+  flushFieldBlock();
+  flushTestingTable();
+  return elements;
+}
+
 app.post('/api/export/word', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated' });
   const { message, content } = req.body;

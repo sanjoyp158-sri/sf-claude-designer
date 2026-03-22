@@ -25,9 +25,6 @@ app.use(session({
 }));
 app.use(express.static(path.join(__dirname, '../frontend')));
 
-// ——————————————————————————
-// HELPER: SOAP Login
-// ——————————————————————————
 async function soapLogin(username, password, securityToken, orgType) {
   const loginUrl = orgType === 'sandbox' ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
   const fullPassword = securityToken ? password + securityToken : password;
@@ -40,7 +37,6 @@ async function soapLogin(username, password, securityToken, orgType) {
     </urn:login>
   </soapenv:Body>
 </soapenv:Envelope>`;
-
   const response = await axios.post(loginUrl + '/services/Soap/u/57.0', soapBody, {
     headers: { 'Content-Type': 'text/xml', 'SOAPAction': 'login' }
   });
@@ -63,9 +59,6 @@ async function soapLogin(username, password, securityToken, orgType) {
   };
 }
 
-// ——————————————————————————
-// ROUTE: Login
-// ——————————————————————————
 app.post('/api/login', async (req, res) => {
   const { username, password, securityToken, orgType } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password are required.' });
@@ -90,9 +83,6 @@ app.get('/api/auth/status', (req, res) => {
 
 app.post('/api/auth/logout', (req, res) => { req.session.destroy(); res.json({ success: true }); });
 
-// ——————————————————————————
-// HELPER: Detect export intent
-// ——————————————————————————
 function detectExportIntent(message) {
   const msg = message.toLowerCase();
   const wordKw = ['word document','word doc','docx','word file','ms word','microsoft word','generate word','create word','export word','download word','word format'];
@@ -102,9 +92,6 @@ function detectExportIntent(message) {
   return { isWord, isExcel, isAny: isWord || isExcel };
 }
 
-// ——————————————————————————
-// HELPER: Fetch Salesforce metadata
-// ——————————————————————————
 async function getSalesforceMetadata(message, accessToken, instanceUrl) {
   let metadataContext = '';
   try {
@@ -113,14 +100,10 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
     });
     const objects = descRes.data.sobjects.filter(o => o.queryable && o.createable).slice(0, 30).map(o => o.name).join(', ');
     metadataContext += 'Available Salesforce Objects: ' + objects + '\n\n';
-
     const matches = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g);
     const objectsToDescribe = matches ? matches.slice(0, 3) : [];
     const msgLower = message.toLowerCase();
-    if (msgLower.includes('account') && !objectsToDescribe.includes('Account')) {
-      objectsToDescribe.unshift('Account');
-    }
-
+    if (msgLower.includes('account') && !objectsToDescribe.includes('Account')) objectsToDescribe.unshift('Account');
     for (const objName of objectsToDescribe.slice(0, 2)) {
       try {
         const objRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/', {
@@ -133,7 +116,6 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
         }));
         metadataContext += 'Object: ' + objName + '\nLabel: ' + objRes.data.label + '\n';
         metadataContext += 'Fields (first 50): ' + JSON.stringify(fields.slice(0, 50), null, 2) + '\n\n';
-
         try {
           const layoutRes = await axios.get(
             instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/layouts/',
@@ -141,11 +123,7 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
           );
           const layoutData = layoutRes.data;
           const layoutNames = [];
-          if (layoutData.layouts) {
-            for (const layout of layoutData.layouts) {
-              if (layout.name) layoutNames.push(layout.name);
-            }
-          }
+          if (layoutData.layouts) for (const layout of layoutData.layouts) { if (layout.name) layoutNames.push(layout.name); }
           if (layoutNames.length > 0) {
             metadataContext += 'Page Layouts for ' + objName + ':\n';
             layoutNames.forEach(n => { metadataContext += ' - ' + n + '\n'; });
@@ -154,8 +132,7 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
         } catch (le) {
           try {
             const layoutRes2 = await axios.get(
-              instanceUrl + '/services/data/v57.0/query/?q=' +
-              encodeURIComponent("SELECT Id, Name FROM Layout WHERE TableEnumOrId = '" + objName + "'"),
+              instanceUrl + '/services/data/v57.0/query/?q=' + encodeURIComponent("SELECT Id, Name FROM Layout WHERE TableEnumOrId = '" + objName + "'"),
               { headers: { Authorization: 'Bearer ' + accessToken } }
             );
             if (layoutRes2.data.records && layoutRes2.data.records.length > 0) {
@@ -163,36 +140,23 @@ async function getSalesforceMetadata(message, accessToken, instanceUrl) {
               layoutRes2.data.records.forEach(r => { metadataContext += ' - ' + r.Name + '\n'; });
               metadataContext += '\n';
             }
-          } catch (le2) {
-            console.log('Page layout fetch failed:', le2.message);
-          }
+          } catch (le2) { console.log('Page layout fetch failed:', le2.message); }
         }
-      } catch (e) {
-        console.log('Object describe failed for', objName, e.message);
-      }
+      } catch (e) { console.log('Object describe failed for', objName, e.message); }
     }
-
     try {
       const profileRes = await axios.get(
         instanceUrl + '/services/data/v57.0/query/?q=' + encodeURIComponent("SELECT Id, Name FROM Profile ORDER BY Name LIMIT 20"),
         { headers: { Authorization: 'Bearer ' + accessToken } }
       );
       if (profileRes.data.records) {
-        const profileNames = profileRes.data.records.map(p => p.Name).join(', ');
-        metadataContext += 'Available Profiles: ' + profileNames + '\n\n';
+        metadataContext += 'Available Profiles: ' + profileRes.data.records.map(p => p.Name).join(', ') + '\n\n';
       }
-    } catch (pe) {
-      console.log('Profile fetch failed:', pe.message);
-    }
-  } catch (e) {
-    console.error('Metadata error:', e.message);
-  }
+    } catch (pe) { console.log('Profile fetch failed:', pe.message); }
+  } catch (e) { console.error('Metadata error:', e.message); }
   return metadataContext;
 }
 
-// ——————————————————————————
-// HELPER: Call Claude with metadata
-// ——————————————————————————
 async function getDesignSpec(message, accessToken, instanceUrl, exportType) {
   const metadataContext = await getSalesforceMetadata(message, accessToken, instanceUrl);
 
@@ -204,52 +168,89 @@ async function getDesignSpec(message, accessToken, instanceUrl, exportType) {
 5. Write in clean prose paragraphs for descriptions
 6. For the Testing Checklist, output ONLY using this EXACT marker format (one per line):
    TEST_ROW: <Step #> | <Step Description> | <Expected Result>
-   Example:
-   TEST_ROW: Step 1 | Log in as a user with the Field Sales Representative profile | Login successful
-7. For field/profile/layout specs use this EXACT format:
-   FIELD: <field label>
+7. For ALL field/profile/layout/object specs use this EXACT block format:
+   FIELD: <label>
    - API Name: <value>
    - Type: <value>
    - Values: <value>
    - Required: Yes/No
    - Help Text: <value>
-
+   PROFILE: <exact profile name>
+   - Field Access: <value>
+   - Visibility: <value>
+   LAYOUT: <exact layout name>
+   - Action: <value>
+   - Section: <value>
+   - Position: <value>
+   - Required on Layout: Yes/No
 Always generate the COMPLETE specification immediately. Never ask for more details.
-If something is not specified, make a reasonable Salesforce best-practice assumption and note it.
-Use the EXACT page layout names and profile names from the metadata provided - never say "default layout".`;
+Use the EXACT page layout names and profile names from the metadata provided.`;
 
   const exportInstruction = `
-Structure your response with EXACTLY these 4 sections in this order:
+Structure your response with EXACTLY these sections in this order:
 
 ## 1. Requirement
 Write the requirement as stated by the user in 2-3 clear sentences.
 
 ## 2. User Story
 ### Summary
-Write a concise one-line user story in the format: "As a <role>, I want to <action> so that <benefit>."
+Write a concise one-line user story: "As a <role>, I want to <action> so that <benefit>."
 
 ### Detailed Acceptance Criteria
-List each acceptance criterion as a bullet point (- ), being specific and testable. Reference exact field names, picklist values, profile names and layout names from the Salesforce metadata.
+List each acceptance criterion as a bullet point (- ), specific and testable, referencing exact field names, picklist values, profile names and layout names from the Salesforce metadata.
 
 ### Description / Additional Notes
-Write 2-4 sentences of additional context. Example style: "Consent Given field will have Yes and No as picklist values to select from. For all other profiles, Consent Given field is not displayed on their respective layouts."
+Write 2-4 sentences of additional context. Example: "Consent Given field will have Yes and No as picklist values to select from. For all other profiles, Consent Given field is not displayed on their respective layouts."
 
 ## 3. Implementation Steps
-Number each step clearly. Be specific - reference exact Salesforce Setup paths, field API names, layout names and profile names from the metadata.
+Number each step clearly. Reference exact Salesforce Setup paths, field API names, layout names and profile names.
 1. Step one
 2. Step two
-3. Step three
 
 ## 4. Testing Checklist
-Output ONLY TEST_ROW markers - one per test step - in this exact format:
-TEST_ROW: Step 1 | <step description referencing exact profile/layout/field from metadata> | <expected result>
-TEST_ROW: Step 2 | <step description> | <expected result>
-TEST_ROW: Step 3 | <step description> | <expected result>
-(include at least 5 meaningful test steps)`;
+TEST_ROW: Step 1 | <description referencing exact profile/layout/field> | <expected result>
+TEST_ROW: Step 2 | <description> | <expected result>
+(include at least 5 meaningful test steps)
+
+## 5. Object Details
+FIELD: Object Overview
+- Object Name: <value>
+- API Name: <value>
+- Object Type: Standard/Custom
+- Purpose: <value>
+- Customization Type: New Custom Field Addition
+
+## 6. Field Specifications
+For EACH field, use this block format:
+FIELD: <Field Label>
+- API Name: <value>
+- Field Type: <value>
+- Picklist Values: <value or N/A>
+- Required: Yes/No
+- Default Value: <value or None>
+- Help Text: <suggested help text>
+- Description: <purpose>
+
+## 7. Profile and Permission Settings
+For each profile from the metadata, specify:
+PROFILE: <Exact Profile Name from metadata>
+- Field Access: Read/Write or Read Only or Hidden
+- Visibility: Visible/Hidden
+
+## 8. Page Layout Settings
+Use the EXACT page layout names from the metadata. For each layout:
+LAYOUT: <Exact Layout Name from metadata>
+- Action: Add field
+- Section: <recommended section>
+- Position: <left column / right column>
+- Required on Layout: Yes/No
+
+## 9. Validation Rules
+List any needed validation rules or state "None required for this implementation."`;
 
   const claudeRes = await anthropic.messages.create({
     model: 'claude-opus-4-5',
-    max_tokens: 4000,
+    max_tokens: 6000,
     system: `You are a Salesforce design specification expert.
 
 ${baseInstruction}
@@ -264,9 +265,6 @@ ${metadataContext}`,
   return claudeRes.content[0].text;
 }
 
-// ——————————————————————————
-// ROUTE: Chat
-// ——————————————————————————
 app.post('/api/chat', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated with Salesforce' });
   const { message } = req.body;
@@ -283,17 +281,11 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// ——————————————————————————
-// HELPER: Build Word paragraph from text (handles bold inline)
-// ——————————————————————————
 function makeTextRuns(text) {
   const parts = text.split(/\*\*(.*?)\*\*/g);
   return parts.map((part, i) => new TextRun({ text: part, bold: i % 2 === 1, size: 22, font: 'Calibri' }));
 }
 
-// ——————————————————————————
-// HELPER: Build styled 2-column Word table from key:value pairs
-// ——————————————————————————
 function buildKeyValueTable(rows) {
   const borderStyle = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
   const tableRows = rows.map((row, idx) => {
@@ -304,19 +296,13 @@ function buildKeyValueTable(rows) {
           width: { size: 35, type: WidthType.PERCENTAGE },
           shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
           borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
-          children: [new Paragraph({
-            children: [new TextRun({ text: row.key, bold: true, color: '000000', size: 20, font: 'Calibri' })],
-            spacing: { before: 60, after: 60 }
-          })]
+          children: [new Paragraph({ children: [new TextRun({ text: row.key, bold: true, color: '000000', size: 20, font: 'Calibri' })], spacing: { before: 60, after: 60 } })]
         }),
         new TableCell({
           width: { size: 65, type: WidthType.PERCENTAGE },
           shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
           borders: { top: borderStyle, bottom: borderStyle, left: borderStyle, right: borderStyle },
-          children: [new Paragraph({
-            children: [new TextRun({ text: row.value, color: '000000', size: 20, font: 'Calibri' })],
-            spacing: { before: 60, after: 60 }
-          })]
+          children: [new Paragraph({ children: [new TextRun({ text: row.value, color: '000000', size: 20, font: 'Calibri' })], spacing: { before: 60, after: 60 } })]
         })
       ]
     });
@@ -324,28 +310,19 @@ function buildKeyValueTable(rows) {
   return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows });
 }
 
-// ——————————————————————————
-// HELPER: Build Testing Checklist Word table
-// ——————————————————————————
 function buildTestingTable(testRows) {
   const headerBorder = { style: BorderStyle.SINGLE, size: 2, color: '1F4E79' };
   const cellBorder = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
-
   const headerCells = ['Step #', 'Step Description', 'Expected Result', 'Actual Result'].map((title, idx) => {
     const widths = [10, 35, 35, 20];
     return new TableCell({
       width: { size: widths[idx], type: WidthType.PERCENTAGE },
       shading: { fill: '1F4E79', type: ShadingType.CLEAR, color: '1F4E79' },
       borders: { top: headerBorder, bottom: headerBorder, left: headerBorder, right: headerBorder },
-      children: [new Paragraph({
-        children: [new TextRun({ text: title, bold: true, color: 'FFFFFF', size: 20, font: 'Calibri' })],
-        spacing: { before: 80, after: 80 }
-      })]
+      children: [new Paragraph({ children: [new TextRun({ text: title, bold: true, color: 'FFFFFF', size: 20, font: 'Calibri' })], spacing: { before: 80, after: 80 } })]
     });
   });
-
   const rows = [new TableRow({ children: headerCells })];
-
   testRows.forEach((row, idx) => {
     const bgColor = idx % 2 === 0 ? 'F2F7FC' : 'FFFFFF';
     const widths = [10, 35, 35, 20];
@@ -354,33 +331,23 @@ function buildTestingTable(testRows) {
       width: { size: widths[ci], type: WidthType.PERCENTAGE },
       shading: { fill: bgColor, type: ShadingType.CLEAR, color: bgColor },
       borders: { top: cellBorder, bottom: cellBorder, left: cellBorder, right: cellBorder },
-      children: [new Paragraph({
-        children: [new TextRun({ text: val, size: 20, font: 'Calibri' })],
-        spacing: { before: 80, after: 80 }
-      })]
+      children: [new Paragraph({ children: [new TextRun({ text: val, size: 20, font: 'Calibri' })], spacing: { before: 80, after: 80 } })]
     }));
     rows.push(new TableRow({ children: cells }));
   });
-
   return new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows });
 }
 
-// ——————————————————————————
-// HELPER: Parse Claude's text output into Word doc elements
-// ——————————————————————————
 function parseToWordElements(specText, requirementText) {
   const lines = specText.split('\n');
   const elements = [];
   let i = 0;
 
-  // Title
   elements.push(new Paragraph({
     children: [new TextRun({ text: 'Salesforce Life Science Cloud Design Specification', bold: true, size: 48, color: '1F4E79', font: 'Calibri' })],
     alignment: AlignmentType.CENTER,
     spacing: { after: 200 }
   }));
-
-  // Date line
   elements.push(new Paragraph({
     children: [new TextRun({ text: 'Generated: ' + new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), size: 20, color: '666666', font: 'Calibri' })],
     alignment: AlignmentType.CENTER,
@@ -420,29 +387,22 @@ function parseToWordElements(specText, requirementText) {
     if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed)) { i++; continue; }
     if (/^---+$/.test(trimmed) || /^===+$/.test(trimmed)) { i++; continue; }
 
-    // TEST_ROW marker
     if (/^TEST_ROW:\s*(.+)/.test(trimmed)) {
       flushFieldBlock();
       const content = trimmed.replace(/^TEST_ROW:\s*/, '');
       const parts = content.split('|').map(p => p.trim());
       testRows.push({ step: parts[0] || '', description: parts[1] || '', expected: parts[2] || '' });
-      i++;
-      continue;
+      i++; continue;
     }
 
-    // Flush test table when new heading arrives
-    if (/^##/.test(trimmed) && testRows.length > 0) {
-      flushTestingTable();
-    }
+    if (/^##/.test(trimmed) && testRows.length > 0) flushTestingTable();
 
-    // FIELD: block
     if (/^FIELD:\s*(.+)/.test(trimmed)) {
       flushFieldBlock();
       fieldBlock = trimmed.replace(/^FIELD:\s*/, '');
       i++; continue;
     }
 
-    // PROFILE: or LAYOUT: block
     if (/^(PROFILE|LAYOUT):\s*(.+)/.test(trimmed)) {
       flushFieldBlock();
       const m = trimmed.match(/^(PROFILE|LAYOUT):\s*(.+)/);
@@ -458,9 +418,7 @@ function parseToWordElements(specText, requirementText) {
       i++; continue;
     }
 
-    if (fieldBlock && trimmed !== '' && !/^-/.test(trimmed)) {
-      flushFieldBlock();
-    }
+    if (fieldBlock && trimmed !== '' && !/^-/.test(trimmed)) flushFieldBlock();
 
     if (/^##\s/.test(trimmed)) {
       const text = trimmed.replace(/^##\s*/, '');
@@ -515,10 +473,7 @@ function parseToWordElements(specText, requirementText) {
       i++; continue;
     }
 
-    elements.push(new Paragraph({
-      children: makeTextRuns(trimmed),
-      spacing: { after: 120 }
-    }));
+    elements.push(new Paragraph({ children: makeTextRuns(trimmed), spacing: { after: 120 } }));
     i++;
   }
 
@@ -527,31 +482,18 @@ function parseToWordElements(specText, requirementText) {
   return elements;
 }
 
-// ——————————————————————————
-// ROUTE: Export to Word (.docx)
-// ——————————————————————————
 app.post('/api/export/word', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated' });
   const { message, content } = req.body;
   try {
     let specText = content;
-    if (!specText) {
-      specText = await getDesignSpec(message, req.session.sfAccessToken, req.session.sfInstanceUrl, 'word');
-    }
-
+    if (!specText) specText = await getDesignSpec(message, req.session.sfAccessToken, req.session.sfInstanceUrl, 'word');
     const docChildren = parseToWordElements(specText, message);
-
     const doc = new Document({
-      numbering: {
-        config: [{
-          reference: 'default-numbering',
-          levels: [{ level: 0, format: 'decimal', text: '%1.', alignment: AlignmentType.START, style: { paragraph: { indent: { left: 720, hanging: 260 } } } }]
-        }]
-      },
+      numbering: { config: [{ reference: 'default-numbering', levels: [{ level: 0, format: 'decimal', text: '%1.', alignment: AlignmentType.START, style: { paragraph: { indent: { left: 720, hanging: 260 } } } }] }] },
       styles: { default: { document: { run: { font: 'Calibri', size: 22 } } } },
       sections: [{ properties: { page: { margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } }, children: docChildren }]
     });
-
     const buffer = await Packer.toBuffer(doc);
     const filename = 'SF_Design_Spec_' + new Date().toISOString().slice(0, 10) + '.docx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
@@ -563,23 +505,17 @@ app.post('/api/export/word', async (req, res) => {
   }
 });
 
-// ——————————————————————————
-// ROUTE: Export to Excel (.xlsx)
-// ——————————————————————————
 app.post('/api/export/excel', async (req, res) => {
   if (!req.session.sfAccessToken) return res.status(401).json({ error: 'Not authenticated' });
   const { message, content } = req.body;
   try {
     let specText = content;
-    if (!specText) {
-      specText = await getDesignSpec(message, req.session.sfAccessToken, req.session.sfInstanceUrl, 'excel');
-    }
+    if (!specText) specText = await getDesignSpec(message, req.session.sfAccessToken, req.session.sfInstanceUrl, 'excel');
 
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'SF Claude Designer';
     workbook.created = new Date();
 
-    // Sheet 1: Design Specification
     const sheet1 = workbook.addWorksheet('Design Specification');
     sheet1.columns = [{ key: 'col1', width: 30 }, { key: 'col2', width: 80 }];
 
@@ -615,14 +551,12 @@ app.post('/api/export/excel', async (req, res) => {
 
     for (const line of lines) {
       const trimmed = line.trim();
-
       if (/^TEST_ROW:\s*(.+)/.test(trimmed)) {
         const rowContent = trimmed.replace(/^TEST_ROW:\s*/, '');
         const parts = rowContent.split('|').map(p => p.trim());
         testRowsExcel.push({ step: parts[0] || '', description: parts[1] || '', expected: parts[2] || '', actual: '' });
         continue;
       }
-
       if (/^\|/.test(trimmed) || /^[-|]{3,}/.test(trimmed) || /^---+$/.test(trimmed)) continue;
       if (!trimmed) { rowIdx++; continue; }
 
@@ -658,7 +592,6 @@ app.post('/api/export/excel', async (req, res) => {
       rowIdx++;
     }
 
-    // Sheet 2: Testing Checklist
     const sheet2 = workbook.addWorksheet('Testing Checklist');
     sheet2.columns = [
       { header: 'Step #', key: 'step', width: 12 },
@@ -666,7 +599,6 @@ app.post('/api/export/excel', async (req, res) => {
       { header: 'Expected Result', key: 'expected', width: 40 },
       { header: 'Actual Result', key: 'actual', width: 35 }
     ];
-
     const hdr2 = sheet2.getRow(1);
     hdr2.eachCell(cell => {
       cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Calibri', size: 12 };
@@ -681,22 +613,14 @@ app.post('/api/export/excel', async (req, res) => {
       const row = sheet2.addRow(tr);
       row.eachCell(cell => {
         cell.font = { name: 'Calibri', size: 11 };
-        cell.border = {
-          top: { style: 'thin', color: { argb: 'FFE0E5EE' } },
-          bottom: { style: 'thin', color: { argb: 'FFE0E5EE' } },
-          left: { style: 'thin', color: { argb: 'FFE0E5EE' } },
-          right: { style: 'thin', color: { argb: 'FFE0E5EE' } }
-        };
+        cell.border = { top: { style: 'thin', color: { argb: 'FFE0E5EE' } }, bottom: { style: 'thin', color: { argb: 'FFE0E5EE' } }, left: { style: 'thin', color: { argb: 'FFE0E5EE' } }, right: { style: 'thin', color: { argb: 'FFE0E5EE' } } };
         cell.alignment = { wrapText: true, vertical: 'top' };
         if (tRowIdx % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F8FF' } };
       });
       sheet2.getRow(tRowIdx).height = 40;
       tRowIdx++;
     }
-
-    if (tRowIdx === 2) {
-      sheet2.addRow({ step: 'Step 1', description: 'See Design Specification tab for details', expected: '', actual: '' });
-    }
+    if (tRowIdx === 2) sheet2.addRow({ step: 'Step 1', description: 'See Design Specification tab', expected: '', actual: '' });
 
     const filename = 'SF_Design_Spec_' + new Date().toISOString().slice(0, 10) + '.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');

@@ -99,52 +99,86 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
   const conflicts = [];
   const msgLower = message.toLowerCase();
 
-  // Extract object names from message
-  const objMatches = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g) || [];
+  // Detect mentioned Salesforce objects
   const commonObjects = ['Account','Contact','Opportunity','Lead','Case','Task','Event','Campaign','Product2','Contract','Order','Quote'];
   const mentionedObjects = [];
   for (const obj of commonObjects) {
     if (msgLower.includes(obj.toLowerCase())) mentionedObjects.push(obj);
   }
+  // Also check for explicit capitalized object names in message
+  const objMatches = message.match(/\b([A-Z][a-zA-Z0-9_]+(?:__c)?)\b/g) || [];
   for (const obj of objMatches) {
-    if (!mentionedObjects.includes(obj)) mentionedObjects.push(obj);
+    if (!mentionedObjects.includes(obj) && commonObjects.includes(obj)) mentionedObjects.push(obj);
   }
   if (mentionedObjects.length === 0) return { hasConflicts: false, conflicts: [] };
 
-  // Extract candidate field names from patterns like "field called X", "add X field"
-  const fieldNameRegexes = [
-    /field(?:\s+called|\s+named|\s+for)?\s+["'`]?([\w\s]+)["'`]?/gi,
-    /(?:add|create|new)\s+["'`]?([\w\s]+)["'`]?\s+field/gi,
-    /["'`]([\w\s]+)["'`]\s+(?:field|picklist|checkbox|text|number|date|lookup)/gi
-  ];
-  const candidateFieldNames = new Set();
-  for (const rx of fieldNameRegexes) {
-    rx.lastIndex = 0;
-    let m;
-    while ((m = rx.exec(message)) !== null) {
-      const n = m[1].trim().toLowerCase().replace(/\s+/g, ' ');
-      if (n.length > 1 && n.length < 50) candidateFieldNames.add(n);
-    }
-  }
+  // ——— Improved field name extraction ———
+  // Stop words - generic words never part of a field name
+  const stopWords = new Set([
+    'add','create','new','a','an','the','custom','standard','want','wants',
+    'needs','please','should','must','will','can','some','any','this','that',
+    'get','has','have','put','set','use','make','i','to','do','be','in',
+    'on','at','for','of','by','as','or','and','but','is','are','was',
+    'generate','build','design','write','produce','give','show','team',
+    'need','require','request','would','like','also','more','other',
+    'which','so','they','we','object','level',
+  ]);
+  // Words stripped from end of captured group (field type descriptors)
+  const trailingStop = new Set([
+    'picklist','checkbox','text','number','date','lookup','field','formula',
+    'currency','percent','phone','email','url','textarea','master','detail',
+    'new','custom','standard',
+  ]);
 
-  // Extract candidate picklist values
+  const candidateFieldNames = new Set();
+  const addIfValid = (raw) => {
+    const words = raw.trim().toLowerCase().replace(/\s+/g,' ').split(' ');
+    while (words.length > 0 && trailingStop.has(words[words.length - 1])) words.pop();
+    if (words.length === 0) return;
+    if (stopWords.has(words[0])) return;
+    const cleaned = words.join(' ');
+    if (cleaned.length > 1 && cleaned.length < 40) candidateFieldNames.add(cleaned);
+  };
+
+  let m;
+  // Pattern 1: field called/named "QuotedName"
+  const rx1 = /\bfield\s+(?:called|named|for)\s+["'\u201c\u201d]([^"'\u201c\u201d]{1,40})["'\u201c\u201d]/gi;
+  rx1.lastIndex = 0;
+  while ((m = rx1.exec(message)) !== null) addIfValid(m[1]);
+
+  // Pattern 2: field called/named TitleCaseName (unquoted, stops at preposition)
+  const rx2 = /\bfield\s+(?:called|named|for)\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,2})(?=\s+(?:at|in|on|for|to|which|that|is|will|the)|[.,!?]|$)/gi;
+  rx2.lastIndex = 0;
+  while ((m = rx2.exec(message)) !== null) addIfValid(m[1]);
+
+  // Pattern 3: "TitleCase [TitleCase] field/picklist" - field name precedes the keyword
+  const rx3 = /\b([A-Z][a-zA-Z]{2,20}(?:\s+[A-Z][a-zA-Z]{1,20}){0,2})\s+(?:field|picklist)\b/gi;
+  rx3.lastIndex = 0;
+  while ((m = rx3.exec(message)) !== null) addIfValid(m[1]);
+
+  // Pattern 4: add/create "QuotedName" field
+  const rx4 = /(?:add|create)\s+["'\u201c\u201d]([^"'\u201c\u201d]{1,40})["'\u201c\u201d]\s+field/gi;
+  rx4.lastIndex = 0;
+  while ((m = rx4.exec(message)) !== null) addIfValid(m[1]);
+
+  // ——— Picklist value extraction (unchanged) ———
   const picklistRegexes = [
-    /(?:picklist\s+values?|values?\s+(?:like|such as|including|of))\s*[:"'`]?\s*([\w\s,\/&-]+)/gi,
-    /(?:add|create|new)\s+(?:picklist\s+)?values?\s+["'`]?([\w\s,\/&-]+)["'`]?/gi,
-    /values?\s*(?:should\s+be|will\s+be|are)\s*["'`]?([\w\s,\/&-]+)["'`]?/gi
+    /(?:picklist\s+values?|values?\s+(?:like|such as|including|of))\s*[:"'\u2018\u2019]?\s*([\w\s,\/&-]+)/gi,
+    /(?:add|create|new)\s+(?:picklist\s+)?values?\s+["'\u201c\u201d]?([\w\s,\/&-]+)["'\u201c\u201d]?/gi,
+    /values?\s*(?:should\s+be|will\s+be|are)\s*["'\u201c\u201d]?([\w\s,\/&-]+)["'\u201c\u201d]?/gi,
   ];
   const candidatePicklistValues = new Set();
   for (const rx of picklistRegexes) {
     rx.lastIndex = 0;
-    let m;
     while ((m = rx.exec(message)) !== null) {
       m[1].trim().split(/[,\/]/).forEach(v => {
-        const val = v.trim().replace(/\band\b/gi, '').trim();
+        const val = v.trim().replace(/\band\b/gi,'').trim();
         if (val.length > 0 && val.length < 50) candidatePicklistValues.add(val.toLowerCase());
       });
     }
   }
 
+  // ——— Check each object ———
   for (const objName of mentionedObjects.slice(0, 2)) {
     try {
       const objRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/', {
@@ -157,15 +191,19 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
         for (const field of existingFields) {
           const existingLabel = field.label.toLowerCase();
           const existingApi = field.name.toLowerCase().replace(/__c$/, '').replace(/_/g, ' ');
-          if (existingLabel === candidateName || existingApi === candidateName ||
-              existingLabel.includes(candidateName) || candidateName.includes(existingLabel)) {
+          if (
+            existingLabel === candidateName ||
+            existingApi === candidateName ||
+            existingLabel.includes(candidateName) ||
+            candidateName.includes(existingLabel)
+          ) {
             conflicts.push({
               type: 'FIELD_EXISTS',
-              message: '\u26a0\ufe0f Field Conflict Detected on ' + objName + '\n\n' +
+              message: '⚠️ Field Conflict Detected on ' + objName + '\n\n' +
                 'A field with a similar name already exists:\n' +
-                '\u2022 Label: "' + field.label + '"\n' +
-                '\u2022 API Name: ' + field.name + '\n' +
-                '\u2022 Type: ' + field.type + '\n\n' +
+                '• Label: "' + field.label + '"\n' +
+                '• API Name: ' + field.name + '\n' +
+                '• Type: ' + field.type + '\n\n' +
                 'The field "' + candidateName + '" you are trying to create already exists in the ' + objName + ' object. ' +
                 'Please review the existing field before creating a new one.\n\n' +
                 'If you intended to modify the existing field or add picklist values to it, please clarify your requirement.'
@@ -180,8 +218,6 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
       if (candidatePicklistValues.size > 0 && conflicts.length === 0) {
         for (const field of existingFields) {
           if (field.type !== 'picklist' || !field.picklistValues || field.picklistValues.length === 0) continue;
-
-          // If we have a candidate field name, check only matching fields; otherwise check all picklist fields
           let shouldCheck = candidateFieldNames.size === 0;
           if (!shouldCheck) {
             for (const cn of candidateFieldNames) {
@@ -193,9 +229,7 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
             }
           }
           if (!shouldCheck) continue;
-
-          const activeConflicts = [];
-          const inactiveConflicts = [];
+          const activeConflicts = [], inactiveConflicts = [];
           for (const candidate of candidatePicklistValues) {
             for (const pv of field.picklistValues) {
               const pvLow = pv.value.toLowerCase();
@@ -206,16 +240,15 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
               }
             }
           }
-
           if (activeConflicts.length > 0 || inactiveConflicts.length > 0) {
             const allConflicting = [...activeConflicts, ...inactiveConflicts];
             const activeVals = field.picklistValues.filter(p => p.active).map(p => '"' + p.value + '"').join(', ') || 'None';
             const inactiveVals = field.picklistValues.filter(p => !p.active).map(p => '"' + p.value + '"').join(', ') || 'None';
             conflicts.push({
               type: 'PICKLIST_VALUE_EXISTS',
-              message: '\u26a0\ufe0f Picklist Value Conflict Detected on ' + objName + ' > ' + field.label + '\n\n' +
+              message: '⚠️ Picklist Value Conflict Detected on ' + objName + ' > ' + field.label + '\n\n' +
                 'The following picklist value(s) you are trying to add already exist:\n' +
-                allConflicting.map(v => '  \u2022 ' + v).join('\n') + '\n\n' +
+                allConflicting.map(v => '  • ' + v).join('\n') + '\n\n' +
                 'Active values currently on this field: ' + activeVals + '\n' +
                 'Inactive values: ' + inactiveVals + '\n\n' +
                 'Please review the existing picklist values before adding duplicates. ' +
@@ -225,7 +258,6 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
           }
         }
       }
-
     } catch (e) {
       console.log('Validation check failed for', objName, e.message);
     }

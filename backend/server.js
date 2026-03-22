@@ -269,6 +269,9 @@ async function validateMetadataConflicts(message, accessToken, instanceUrl) {
 // ——————————————————————————
 // HELPER: Semantic similarity check - detect conceptually similar existing fields
 // ——————————————————————————
+// ——————————————————————————
+// HELPER: Semantic similarity check - detect conceptually similar existing fields
+// ——————————————————————————
 async function checkSemanticSimilarity(message, accessToken, instanceUrl) {
   const msgLower = message.toLowerCase();
   const commonObjects = ['Account','Contact','Opportunity','Lead','Case','Task','Event','Campaign','Product2','Contract','Order','Quote'];
@@ -279,41 +282,97 @@ async function checkSemanticSimilarity(message, accessToken, instanceUrl) {
   if (mentionedObjects.length === 0) return { hasSimilar: false, similarFields: [], objName: null };
 
   const objName = mentionedObjects[0];
-  let existingFieldsList = [];
+  let allFields = [];
   try {
     const objRes = await axios.get(instanceUrl + '/services/data/v57.0/sobjects/' + objName + '/describe/', {
       headers: { Authorization: 'Bearer ' + accessToken }
     });
-    existingFieldsList = objRes.data.fields.slice(0, 80).map(f => f.label + ' (' + f.type + ')');
+    // Use ALL fields - no slice - custom fields are appended after standard ones
+    allFields = objRes.data.fields.map(f => f.label + ' (' + f.type + ')');
   } catch (e) {
     console.log('Semantic check describe failed:', e.message);
     return { hasSimilar: false, similarFields: [], objName };
   }
 
-  if (existingFieldsList.length === 0) return { hasSimilar: false, similarFields: [], objName };
+  if (allFields.length === 0) return { hasSimilar: false, similarFields: [], objName };
 
-  const prompt = 'You are a Salesforce metadata expert. A user wants to create a new field with this requirement:\n\n"' + message + '"\n\nBelow are the existing fields on the ' + objName + ' object:\n' + existingFieldsList.join('\n') + '\n\nYour task: Identify any existing fields that are CONCEPTUALLY SIMILAR to what the user wants to create — meaning they store the same or closely related kind of data, even if named differently.\n\nExamples of conceptual similarity:\n- "Tax Identification Number" is similar to "Social Security Number" / "SSN" / "National ID"\n- "Mobile Number" is similar to "Phone" / "Cell Phone" / "Contact Number"\n- "Revenue" is similar to "Annual Revenue" / "Total Sales"\n- "Full Name" is similar to "Name" / "Contact Name" / "Account Name"\n\nRules:\n- Only flag fields that truly serve the same data-storage purpose\n- Do NOT flag fields that are merely in the same general domain\n- Return ONLY a JSON array, no explanation\n- Each item: { "existingField": "<label>", "reason": "<one sentence why they are similar>" }\n- If NO conceptually similar field exists, return an empty array: []\n\nJSON array:';
+  // Extract candidate field names from message (same logic as validateMetadataConflicts)
+  const stopWords = new Set(['add','create','new','a','an','the','custom','standard','want','wants','needs','please','should','must','will','can','some','any','this','that','get','has','have','put','set','use','make','i','to','do','be','in','on','at','for','of','by','as','or','and','but','is','are','was','generate','build','design','write','produce','give','show','team','need','require','request','would','like','also','more','other','which','so','they','we','object','level']);
+  const trailingStop = new Set(['picklist','checkbox','text','number','date','lookup','field','formula','currency','percent','phone','email','url','textarea','master','detail','new','custom','standard']);
+  const candidateFieldNames = new Set();
+  const addIfValid = (raw) => {
+    const words = raw.trim().toLowerCase().replace(/\s+/g,' ').split(' ');
+    while (words.length > 0 && trailingStop.has(words[words.length - 1])) words.pop();
+    if (words.length === 0) return;
+    if (stopWords.has(words[0])) return;
+    const cleaned = words.join(' ');
+    if (cleaned.length > 1 && cleaned.length < 40) candidateFieldNames.add(cleaned);
+  };
+  let m;
+  const rx1 = /\bfield\s+(?:called|named|for)\s+["'\u201c\u201d]([^"'\u201c\u201d]{1,40})["'\u201c\u201d]/gi;
+  rx1.lastIndex = 0; while ((m = rx1.exec(message)) !== null) addIfValid(m[1]);
+  const rx2 = /\bfield\s+(?:called|named|for)\s+([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*){0,2})(?=\s+(?:at|in|on|for|to|which|that|is|will|the)|[.,!?]|$)/gi;
+  rx2.lastIndex = 0; while ((m = rx2.exec(message)) !== null) addIfValid(m[1]);
+  const rx3 = /\b([A-Z][a-zA-Z]{2,20}(?:\s+[A-Z][a-zA-Z]{1,20}){0,2})\s+(?:field|picklist)\b/gi;
+  rx3.lastIndex = 0; while ((m = rx3.exec(message)) !== null) addIfValid(m[1]);
+  const rx4 = /(?:add|create)\s+["'\u201c\u201d]([^"'\u201c\u201d]{1,40})["'\u201c\u201d]\s+field/gi;
+  rx4.lastIndex = 0; while ((m = rx4.exec(message)) !== null) addIfValid(m[1]);
+  const candidateList = [...candidateFieldNames].join(', ') || 'not explicitly named';
 
-  try {
-    const claudeRes = await anthropic.messages.create({
-      model: 'claude-opus-4-5',
-      max_tokens: 800,
-      system: 'You are a Salesforce metadata expert. Always respond with valid JSON only, no markdown, no extra text.',
-      messages: [{ role: 'user', content: prompt }]
-    });
-    const raw = claudeRes.content[0].text.trim();
-    const jsonMatch = raw.match(/\[.*\]/s);
-    if (!jsonMatch) return { hasSimilar: false, similarFields: [], objName };
-    const similarFields = JSON.parse(jsonMatch[0]);
-    return {
-      hasSimilar: Array.isArray(similarFields) && similarFields.length > 0,
-      similarFields: Array.isArray(similarFields) ? similarFields : [],
-      objName
-    };
-  } catch (e) {
-    console.log('Semantic similarity check failed:', e.message);
-    return { hasSimilar: false, similarFields: [], objName };
+  // Batch fields to avoid overloading the prompt (120 per batch)
+  const BATCH_SIZE = 120;
+  const batches = [];
+  for (let i = 0; i < allFields.length; i += BATCH_SIZE) {
+    batches.push(allFields.slice(i, i + BATCH_SIZE));
   }
+
+  let allSimilarFields = [];
+
+  for (const batch of batches) {
+    const fieldListText = batch.join('\n');
+    const prompt = 'You are a Salesforce metadata expert. The user wants to create a new field on the ' + objName + ' object.\n\n' +
+      'USER REQUIREMENT: "' + message + '"\n\n' +
+      'EXTRACTED FIELD NAME(S) user wants to create: ' + candidateList + '\n\n' +
+      'EXISTING FIELDS on ' + objName + ':\n' + fieldListText + '\n\n' +
+      'TASK: Check if any EXISTING FIELD already stores the same or very similar data as the requested field - even if named differently.\n\n' +
+      'DATA SIMILARITY EXAMPLES (these should be flagged as similar):\n' +
+      '- Tax Identification Number / TIN / Tax ID = similar to: SSN, Federal Tax ID, National ID, Tax Registration No, Tax Number\n' +
+      '- Mobile Phone / Cell / Contact Number = similar to: Phone, Telephone, Fax (if used for contact)\n' +
+      '- Full Name / Person Name = similar to: Name, Account Name, Contact Name\n' +
+      '- Revenue / Sales Amount = similar to: Annual Revenue\n' +
+      '- NPI Number / DEA Number / License Number = similar to each other (all are professional IDs)\n\n' +
+      'Return ONLY a valid JSON array. Each item: {"existingField": "<exact field label from the list above>", "reason": "<one clear sentence explaining the similarity>"}\n' +
+      'If NO similar field found: return []\n\n' +
+      'JSON:';
+
+    try {
+      const claudeRes = await anthropic.messages.create({
+        model: 'claude-opus-4-5',
+        max_tokens: 1000,
+        system: 'You are a Salesforce metadata expert. Respond ONLY with a valid JSON array. No markdown, no explanation, no extra text.',
+        messages: [{ role: 'user', content: prompt }]
+      });
+      const raw = claudeRes.content[0].text.trim();
+      // Handle both raw [] and ```json ... ``` wrapped responses
+      let jsonStr = raw;
+      const mdMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (mdMatch) jsonStr = mdMatch[1].trim();
+      const arrMatch = jsonStr.match(/\[[\s\S]*\]/);
+      if (arrMatch) {
+        const parsed = JSON.parse(arrMatch[0]);
+        if (Array.isArray(parsed)) allSimilarFields = allSimilarFields.concat(parsed);
+      }
+    } catch (e) {
+      console.log('Semantic similarity batch check failed:', e.message);
+    }
+    if (allSimilarFields.length > 0) break;
+  }
+
+  return {
+    hasSimilar: allSimilarFields.length > 0,
+    similarFields: allSimilarFields,
+    objName
+  };
 }
 
 async function getSalesforceMetadata(message, accessToken, instanceUrl) {
